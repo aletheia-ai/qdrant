@@ -101,7 +101,7 @@ RUN PKG_CONFIG="/usr/bin/$(xx-info)-pkg-config" \
     && mv target/$(xx-cargo --print-target-triple)/$PROFILE_DIR/qdrant /qdrant/qdrant
 
 # Download and extract web UI
-RUN mkdir /static && STATIC_DIR=/static ./tools/sync-web-ui.sh
+RUN mkdir -p /static && STATIC_DIR=/static ./tools/sync-web-ui.sh
 
 
 FROM debian:12-slim AS qdrant

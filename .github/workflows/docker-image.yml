@@ -36,13 +36,4 @@ jobs:
         TAGS="-t ${DOCKERHUB_TAG}"
 
         # Pull, retag and push to GitHub packages
-        docker buildx build --platform='linux/amd64,linux/arm64' --build-arg GIT_COMMIT_ID=${{ github.sha }} $TAGS --push --label "org.opencontainers.image.version"=$RELEASE_VERSION .
-        # Build unprivileged image for Docker Hub
-        DOCKERHUB_TAG_UNPRIVILEGED="qdrant/qdrant:${{ github.ref_name }}-unprivileged"
-        # DOCKERHUB_TAG_LATEST_UNPRIVILEGED="qdrant/qdrant:latest-unprivileged"
-        # TAGS_UNPRIVILEGED="-t ${DOCKERHUB_TAG_UNPRIVILEGED} -t ${DOCKERHUB_TAG_LATEST_UNPRIVILEGED}"
-        
-        # Pull, retag and push to GitHub packages
-        # docker buildx build --build-arg='USER_ID=1000' --platform='linux/amd64,linux/arm64' $TAGS_UNPRIVILEGED --push --label "org.opencontainers.image.version"=$RELEASE_VERSION .
-        # docker pull $DOCKERHUB_TAG_UNPRIVILEGED
-        # docker tag $DOCKERHUB_TAG_UNPRIVILEGED
+        docker buildx build --platform='linux/amd64,linux/arm64' $TAGS --push .
