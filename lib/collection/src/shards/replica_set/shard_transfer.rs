@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use segment::types::PointIdType;
 
 use super::ShardReplicaSet;
-use crate::hash_ring::HashRing;
+use crate::hash_ring::HashRingRouter;
 use crate::operations::types::{CollectionError, CollectionResult};
 use crate::shards::forward_proxy_shard::ForwardProxyShard;
 use crate::shards::local_shard::clock_map::RecoveryPoint;
@@ -23,7 +23,7 @@ impl ShardReplicaSet {
     pub async fn proxify_local(
         &self,
         remote_shard: RemoteShard,
-        resharding_hash_ring: Option<HashRing>,
+        resharding_hash_ring: Option<HashRingRouter>,
     ) -> CollectionResult<()> {
         let mut local = self.local.write().await;
 
@@ -74,9 +74,8 @@ impl ShardReplicaSet {
 
         // Explicit `match` instead of `if-let` to catch `unreachable` condition if top `match` is
         // changed
-        let local_shard = match local.take() {
-            Some(Shard::Local(local_shard)) => local_shard,
-            _ => unreachable!(),
+        let Some(Shard::Local(local_shard)) = local.take() else {
+            unreachable!()
         };
 
         let proxy_shard = ForwardProxyShard::new(
@@ -341,7 +340,7 @@ impl ShardReplicaSet {
         &self,
         offset: Option<PointIdType>,
         batch_size: usize,
-        hashring_filter: Option<&HashRing>,
+        hashring_filter: Option<&HashRingRouter>,
         merge_points: bool,
     ) -> CollectionResult<Option<PointIdType>> {
         let local = self.local.read().await;

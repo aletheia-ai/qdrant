@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -412,14 +413,40 @@ pub trait SegmentOptimizer {
 
         self.check_cancellation(stopped)?;
 
-        for segment in optimizing_segments {
-            match segment {
-                LockedSegment::Original(segment_arc) => {
-                    let segment_guard = segment_arc.read();
-                    segment_builder.update_from(&segment_guard, stopped)?;
+        let segments: Vec<_> = optimizing_segments
+            .iter()
+            .map(|i| match i {
+                LockedSegment::Original(o) => o.clone(),
+                LockedSegment::Proxy(_) => {
+                    panic!("Trying to optimize a segment that is already being optimized!")
                 }
-                LockedSegment::Proxy(_) => panic!("Attempt to optimize segment which is already currently under optimization. Should never happen"),
-            }
+            })
+            .collect();
+
+        let mut defragmentation_keys = HashSet::new();
+        for segment in &segments {
+            let payload_index = &segment.read().payload_index;
+            let payload_index = payload_index.borrow();
+
+            let keys = payload_index
+                .config()
+                .indexed_fields
+                .iter()
+                .filter_map(|(key, schema)| schema.is_tenant().then_some(key))
+                .cloned();
+            defragmentation_keys.extend(keys);
+        }
+
+        if !defragmentation_keys.is_empty() {
+            segment_builder.set_defragment_keys(defragmentation_keys.into_iter().collect());
+        }
+
+        {
+            let segment_guards = segments.iter().map(|segment| segment.read()).collect_vec();
+            segment_builder.update(
+                &segment_guards.iter().map(Deref::deref).collect_vec(),
+                stopped,
+            )?;
         }
 
         for field in proxy_deleted_indexes.read().iter() {
@@ -676,6 +703,7 @@ pub trait SegmentOptimizer {
                 tmp_segment.drop_data()?;
             }
         }
+
         timer.set_success(true);
         Ok(true)
     }

@@ -52,8 +52,18 @@ impl ImmutableGeoMapIndex {
         &self.db_wrapper
     }
 
-    pub fn get_values(&self, idx: PointOffsetType) -> Option<&[GeoPoint]> {
-        self.point_to_values.get_values(idx)
+    pub fn check_values_any(
+        &self,
+        idx: PointOffsetType,
+        check_fn: impl Fn(&GeoPoint) -> bool,
+    ) -> bool {
+        self.point_to_values.check_values_any(idx, check_fn)
+    }
+
+    pub fn values_count(&self, idx: PointOffsetType) -> usize {
+        self.point_to_values
+            .get_values_count(idx)
+            .unwrap_or_default()
     }
 
     pub fn get_points_per_hash(&self) -> impl Iterator<Item = (&GeoHash, usize)> {
@@ -197,13 +207,12 @@ impl ImmutableGeoMapIndex {
                 if values_count > 0 {
                     self.counts_per_hash[index].values = values_count - 1;
                 } else {
-                    debug_assert!(false, "Hash value count is already empty: {}", sub_geo_hash,);
+                    debug_assert!(false, "Hash value count is already empty: {sub_geo_hash}",);
                 }
             } else {
                 debug_assert!(
                     false,
-                    "Hash value count is not found for hash: {}",
-                    sub_geo_hash,
+                    "Hash value count is not found for hash: {sub_geo_hash}",
                 );
             }
         }
@@ -226,13 +235,12 @@ impl ImmutableGeoMapIndex {
                     if points_count > 0 {
                         self.counts_per_hash[index].points = points_count - 1;
                     } else {
-                        debug_assert!(false, "Hash point count is already empty: {}", sub_geo_hash,);
+                        debug_assert!(false, "Hash point count is already empty: {sub_geo_hash}",);
                     }
                 } else {
                     debug_assert!(
                         false,
-                        "Hash point count is not found for hash: {}",
-                        sub_geo_hash,
+                        "Hash point count is not found for hash: {sub_geo_hash}",
                     );
                 };
             }

@@ -183,7 +183,7 @@ pub fn recommend_into_core_search(
 
     for &point_id in &reference_vectors_ids {
         if all_vectors_records_map
-            .get(&lookup_collection_name, point_id)
+            .get(lookup_collection_name, point_id)
             .is_none()
         {
             return Err(CollectionError::PointNotFound {
@@ -239,6 +239,8 @@ where
     F: Fn(String) -> Fut,
     Fut: Future<Output = Option<RwLockReadGuard<'a, Collection>>>,
 {
+    let start = std::time::Instant::now();
+
     // shortcuts batch if all requests with limit=0
     if request_batch.iter().all(|(s, _)| s.limit == 0) {
         return Ok(vec![]);
@@ -272,8 +274,12 @@ where
         collection,
         collection_by_name,
         read_consistency,
+        timeout,
     )
     .await?;
+
+    // update timeout
+    let timeout = timeout.map(|timeout| timeout.saturating_sub(start.elapsed()));
 
     let res = batch_requests::<
         (RecommendRequestInternal, ShardSelectorInternal),

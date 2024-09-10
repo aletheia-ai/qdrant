@@ -1,12 +1,17 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use common::types::PointOffsetType;
 use parking_lot::RwLock;
 use rocksdb::DB;
+use serde_json::Value;
 
 use self::memory::{BinaryItem, BinaryMemory};
-use super::{CardinalityEstimation, PayloadFieldIndex, PrimaryCondition, ValueIndexer};
-use crate::common::operation_error::{OperationError, OperationResult};
+use super::{
+    CardinalityEstimation, FieldIndexBuilderTrait, PayloadFieldIndex, PrimaryCondition,
+    ValueIndexer,
+};
+use crate::common::operation_error::OperationResult;
 use crate::common::rocksdb_buffered_delete_wrapper::DatabaseColumnScheduledDeleteWrapper;
 use crate::common::rocksdb_wrapper::DatabaseColumnWrapper;
 use crate::telemetry::PayloadIndexTelemetry;
@@ -178,12 +183,12 @@ impl BinaryIndex {
         }
     }
 
-    fn storage_cf_name(field: &str) -> String {
-        format!("{}_binary", field)
+    pub fn builder(db: Arc<RwLock<DB>>, field_name: &str) -> BinaryIndexBuilder {
+        BinaryIndexBuilder(Self::new(db, field_name))
     }
 
-    pub fn recreate(&self) -> OperationResult<()> {
-        self.db_wrapper.recreate_column_family()
+    fn storage_cf_name(field: &str) -> String {
+        format!("{field}_binary")
     }
 
     pub fn get_telemetry_data(&self) -> PayloadIndexTelemetry {
@@ -197,7 +202,7 @@ impl BinaryIndex {
 
     pub fn values_count(&self, point_id: PointOffsetType) -> usize {
         let binary_item = self.memory.get(point_id);
-        binary_item.has_true() as usize + binary_item.has_false() as usize
+        usize::from(binary_item.has_true()) + usize::from(binary_item.has_false())
     }
 
     pub fn values_is_empty(&self, point_id: PointOffsetType) -> bool {
@@ -215,16 +220,31 @@ impl BinaryIndex {
     }
 }
 
+pub struct BinaryIndexBuilder(BinaryIndex);
+
+impl FieldIndexBuilderTrait for BinaryIndexBuilder {
+    type FieldIndexType = BinaryIndex;
+
+    fn init(&mut self) -> OperationResult<()> {
+        self.0.db_wrapper.recreate_column_family()
+    }
+
+    fn add_point(&mut self, id: PointOffsetType, payload: &[&Value]) -> OperationResult<()> {
+        self.0.add_point(id, payload)
+    }
+
+    fn finalize(self) -> OperationResult<Self::FieldIndexType> {
+        Ok(self.0)
+    }
+}
+
 impl PayloadFieldIndex for BinaryIndex {
     fn load(&mut self) -> OperationResult<bool> {
         if !self.db_wrapper.has_column_family()? {
             return Ok(false);
         }
 
-        let db_lock = self.db_wrapper.lock_db();
-        let pending_deletes = self.db_wrapper.pending_deletes();
-
-        for (key, value) in db_lock.iter_pending_deletes(pending_deletes)? {
+        for (key, value) in self.db_wrapper.lock_db().iter()? {
             let idx = PointOffsetType::from_be_bytes(key.as_ref().try_into().unwrap());
 
             debug_assert_eq!(value.len(), 1);
@@ -243,28 +263,29 @@ impl PayloadFieldIndex for BinaryIndex {
         self.db_wrapper.flusher()
     }
 
+    fn files(&self) -> Vec<PathBuf> {
+        vec![]
+    }
+
     fn filter<'a>(
         &'a self,
         condition: &'a crate::types::FieldCondition,
-    ) -> OperationResult<Box<dyn Iterator<Item = PointOffsetType> + 'a>> {
+    ) -> Option<Box<dyn Iterator<Item = PointOffsetType> + 'a>> {
         match &condition.r#match {
             Some(Match::Value(MatchValue {
                 value: ValueVariants::Bool(value),
             })) => {
                 if *value {
-                    Ok(Box::new(self.memory.iter_has_true()))
+                    Some(Box::new(self.memory.iter_has_true()))
                 } else {
-                    Ok(Box::new(self.memory.iter_has_false()))
+                    Some(Box::new(self.memory.iter_has_false()))
                 }
             }
-            _ => Err(OperationError::service_error("failed to filter")),
+            _ => None,
         }
     }
 
-    fn estimate_cardinality(
-        &self,
-        condition: &FieldCondition,
-    ) -> OperationResult<CardinalityEstimation> {
+    fn estimate_cardinality(&self, condition: &FieldCondition) -> Option<CardinalityEstimation> {
         match &condition.r#match {
             Some(Match::Value(MatchValue {
                 value: ValueVariants::Bool(value),
@@ -278,11 +299,9 @@ impl PayloadFieldIndex for BinaryIndex {
                 let estimation = CardinalityEstimation::exact(count)
                     .with_primary_clause(PrimaryCondition::Condition(condition.clone()));
 
-                Ok(estimation)
+                Some(estimation)
             }
-            _ => Err(OperationError::service_error(
-                "failed to estimate cardinality",
-            )),
+            _ => None,
         }
     }
 
@@ -323,7 +342,9 @@ impl PayloadFieldIndex for BinaryIndex {
     }
 }
 
-impl ValueIndexer<bool> for BinaryIndex {
+impl ValueIndexer for BinaryIndex {
+    type ValueType = bool;
+
     fn add_many(&mut self, id: PointOffsetType, values: Vec<bool>) -> OperationResult<()> {
         if values.is_empty() {
             return Ok(());
@@ -341,7 +362,7 @@ impl ValueIndexer<bool> for BinaryIndex {
         Ok(())
     }
 
-    fn get_value(&self, value: &serde_json::Value) -> Option<bool> {
+    fn get_value(value: &serde_json::Value) -> Option<bool> {
         value.as_bool()
     }
 
@@ -361,7 +382,7 @@ mod tests {
 
     use super::BinaryIndex;
     use crate::common::rocksdb_wrapper::open_db_with_existing_cf;
-    use crate::index::field_index::{PayloadFieldIndex, ValueIndexer};
+    use crate::index::field_index::{FieldIndexBuilderTrait as _, PayloadFieldIndex, ValueIndexer};
     use crate::json_path::JsonPath;
 
     const FIELD_NAME: &str = "bool_field";
@@ -370,8 +391,7 @@ mod tests {
     fn new_binary_index() -> (TempDir, BinaryIndex) {
         let tmp_dir = Builder::new().prefix(DB_NAME).tempdir().unwrap();
         let db = open_db_with_existing_cf(tmp_dir.path()).unwrap();
-        let index = BinaryIndex::new(db, FIELD_NAME);
-        index.recreate().unwrap();
+        let index = BinaryIndex::builder(db, FIELD_NAME).make_empty().unwrap();
         (tmp_dir, index)
     }
 

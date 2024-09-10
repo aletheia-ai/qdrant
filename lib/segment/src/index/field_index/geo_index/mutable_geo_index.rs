@@ -64,8 +64,22 @@ impl MutableGeoMapIndex {
         &self.db_wrapper
     }
 
-    pub fn get_values(&self, idx: PointOffsetType) -> Option<&[GeoPoint]> {
-        self.point_to_values.get(idx as usize).map(Vec::as_slice)
+    pub fn check_values_any(
+        &self,
+        idx: PointOffsetType,
+        check_fn: impl Fn(&GeoPoint) -> bool,
+    ) -> bool {
+        self.point_to_values
+            .get(idx as usize)
+            .map(|values| values.iter().any(check_fn))
+            .unwrap_or(false)
+    }
+
+    pub fn values_count(&self, idx: PointOffsetType) -> usize {
+        self.point_to_values
+            .get(idx as usize)
+            .map(Vec::len)
+            .unwrap_or_default()
     }
 
     pub fn get_points_per_hash(&self) -> impl Iterator<Item = (&GeoHash, usize)> {
@@ -89,42 +103,37 @@ impl MutableGeoMapIndex {
 
         let mut points_to_hashes: BTreeMap<PointOffsetType, Vec<GeoHash>> = Default::default();
 
-        {
-            let db_lock = self.db_wrapper.lock_db();
-            let pending_deletes = self.db_wrapper.pending_deletes();
+        for (key, value) in self.db_wrapper.lock_db().iter()? {
+            let key_str = std::str::from_utf8(&key).map_err(|_| {
+                OperationError::service_error("Index load error: UTF8 error while DB parsing")
+            })?;
 
-            for (key, value) in db_lock.iter_pending_deletes(pending_deletes)? {
-                let key_str = std::str::from_utf8(&key).map_err(|_| {
-                    OperationError::service_error("Index load error: UTF8 error while DB parsing")
-                })?;
+            let (geo_hash, idx) = GeoMapIndex::decode_db_key(key_str)?;
+            let geo_point = GeoMapIndex::decode_db_value(value)?;
 
-                let (geo_hash, idx) = GeoMapIndex::decode_db_key(key_str)?;
-                let geo_point = GeoMapIndex::decode_db_value(value)?;
-
-                if self.point_to_values.len() <= idx as usize {
-                    self.point_to_values.resize_with(idx as usize + 1, Vec::new);
-                }
-
-                if self.point_to_values[idx as usize].is_empty() {
-                    self.points_count += 1;
-                }
-
-                points_to_hashes
-                    .entry(idx)
-                    .or_default()
-                    .push(geo_hash.clone());
-
-                self.point_to_values[idx as usize].push(geo_point);
-                self.points_map
-                    .entry(geo_hash.clone())
-                    .or_default()
-                    .insert(idx);
-
-                self.points_values_count += 1;
+            if self.point_to_values.len() <= idx as usize {
+                self.point_to_values.resize_with(idx as usize + 1, Vec::new);
             }
+
+            if self.point_to_values[idx as usize].is_empty() {
+                self.points_count += 1;
+            }
+
+            points_to_hashes
+                .entry(idx)
+                .or_default()
+                .push(geo_hash.clone());
+
+            self.point_to_values[idx as usize].push(geo_point);
+            self.points_map
+                .entry(geo_hash.clone())
+                .or_default()
+                .insert(idx);
+
+            self.points_values_count += 1;
         }
 
-        for (_idx, geo_hashes) in points_to_hashes.into_iter() {
+        for (_idx, geo_hashes) in points_to_hashes {
             self.max_values_per_point = max(self.max_values_per_point, geo_hashes.len());
             self.increment_hash_point_counts(&geo_hashes);
             for geo_hash in geo_hashes {
@@ -279,8 +288,7 @@ impl MutableGeoMapIndex {
                 None => {
                     debug_assert!(
                         false,
-                        "Hash value count is not found for hash: {}",
-                        sub_geo_hash
+                        "Hash value count is not found for hash: {sub_geo_hash}"
                     );
                     self.values_per_hash.insert(sub_geo_hash.into(), 0);
                 }
@@ -304,8 +312,7 @@ impl MutableGeoMapIndex {
                     None => {
                         debug_assert!(
                             false,
-                            "Hash point count is not found for hash: {}",
-                            sub_geo_hash
+                            "Hash point count is not found for hash: {sub_geo_hash}"
                         );
                         self.points_per_hash.insert(sub_geo_hash.into(), 0);
                     }

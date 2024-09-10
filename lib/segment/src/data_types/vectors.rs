@@ -422,7 +422,6 @@ pub fn only_default_multi_vector(vec: &MultiDenseVectorInternal) -> NamedVectors
 }
 
 /// Full vector data per point separator with single and multiple vector modes
-/// Multivector is not supported here because this structure is the part of a legacy search API
 #[derive(Clone, Debug, PartialEq)]
 pub enum VectorStructInternal {
     Single(DenseVector),
@@ -478,19 +477,10 @@ impl VectorStructInternal {
 }
 
 /// Dense vector data with name
-
-fn named_vector_example() -> NamedVector {
-    NamedVector {
-        vector: vec![0.875, 0.140625, -0.15625, 0.96875],
-        name: "image".to_string(),
-    }
-}
-
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct NamedVector {
     /// Name of vector data
-    #[schemars(example = "named_vector_example")]
     pub name: String,
     /// Vector data
     pub vector: DenseVector,
@@ -506,23 +496,13 @@ pub struct NamedMultiDenseVector {
 }
 
 /// Sparse vector data with name
-fn named_sparse_vector_example() -> NamedSparseVector {
-    NamedSparseVector {
-        vector: SparseVector {
-            indices: vec![0, 1, 6, 9],
-            values: vec![0.875, 0.140625, -0.15625, 0.96875],
-        },
-        name: "keyword".to_string(),
-    }
-}
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, Validate, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct NamedSparseVector {
     /// Name of vector data
-    #[schemars(example = "named_sparse_vector_example")]
     pub name: String,
     /// Vector data
-    #[validate]
+    #[validate(nested)]
     pub vector: SparseVector,
 }
 
@@ -549,6 +529,12 @@ impl From<NamedVector> for NamedVectorStruct {
 impl From<NamedSparseVector> for NamedVectorStruct {
     fn from(v: NamedSparseVector) -> Self {
         NamedVectorStruct::Sparse(v)
+    }
+}
+
+impl From<NamedMultiDenseVector> for NamedVectorStruct {
+    fn from(v: NamedMultiDenseVector) -> Self {
+        NamedVectorStruct::MultiDense(v)
     }
 }
 

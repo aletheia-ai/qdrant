@@ -69,10 +69,12 @@
     - [SparseVectorConfig](#qdrant-SparseVectorConfig)
     - [SparseVectorConfig.MapEntry](#qdrant-SparseVectorConfig-MapEntry)
     - [SparseVectorParams](#qdrant-SparseVectorParams)
+    - [StrictModeConfig](#qdrant-StrictModeConfig)
     - [TextIndexParams](#qdrant-TextIndexParams)
     - [UpdateCollection](#qdrant-UpdateCollection)
     - [UpdateCollectionClusterSetupRequest](#qdrant-UpdateCollectionClusterSetupRequest)
     - [UpdateCollectionClusterSetupResponse](#qdrant-UpdateCollectionClusterSetupResponse)
+    - [UuidIndexParams](#qdrant-UuidIndexParams)
     - [VectorParams](#qdrant-VectorParams)
     - [VectorParamsDiff](#qdrant-VectorParamsDiff)
     - [VectorParamsDiffMap](#qdrant-VectorParamsDiffMap)
@@ -137,6 +139,10 @@
     - [DiscoverInput](#qdrant-DiscoverInput)
     - [DiscoverPoints](#qdrant-DiscoverPoints)
     - [DiscoverResponse](#qdrant-DiscoverResponse)
+    - [FacetCounts](#qdrant-FacetCounts)
+    - [FacetHit](#qdrant-FacetHit)
+    - [FacetResponse](#qdrant-FacetResponse)
+    - [FacetValue](#qdrant-FacetValue)
     - [FieldCondition](#qdrant-FieldCondition)
     - [Filter](#qdrant-Filter)
     - [GeoBoundingBox](#qdrant-GeoBoundingBox)
@@ -186,6 +192,8 @@
     - [Query](#qdrant-Query)
     - [QueryBatchPoints](#qdrant-QueryBatchPoints)
     - [QueryBatchResponse](#qdrant-QueryBatchResponse)
+    - [QueryGroupsResponse](#qdrant-QueryGroupsResponse)
+    - [QueryPointGroups](#qdrant-QueryPointGroups)
     - [QueryPoints](#qdrant-QueryPoints)
     - [QueryResponse](#qdrant-QueryResponse)
     - [Range](#qdrant-Range)
@@ -240,6 +248,7 @@
     - [Fusion](#qdrant-Fusion)
     - [ReadConsistencyType](#qdrant-ReadConsistencyType)
     - [RecommendStrategy](#qdrant-RecommendStrategy)
+    - [Sample](#qdrant-Sample)
     - [UpdateStatus](#qdrant-UpdateStatus)
     - [WriteOrderingType](#qdrant-WriteOrderingType)
   
@@ -424,6 +433,7 @@
 | optimizer_config | [OptimizersConfigDiff](#qdrant-OptimizersConfigDiff) |  | Configuration of the optimizers |
 | wal_config | [WalConfigDiff](#qdrant-WalConfigDiff) |  | Configuration of the Write-Ahead-Log |
 | quantization_config | [QuantizationConfig](#qdrant-QuantizationConfig) | optional | Configuration of the vector quantization |
+| strict_mode_config | [StrictModeConfig](#qdrant-StrictModeConfig) | optional | Configuration of strict mode. |
 
 
 
@@ -623,6 +633,7 @@
 | quantization_config | [QuantizationConfig](#qdrant-QuantizationConfig) | optional | Quantization configuration of vector |
 | sharding_method | [ShardingMethod](#qdrant-ShardingMethod) | optional | Sharding method |
 | sparse_vectors_config | [SparseVectorConfig](#qdrant-SparseVectorConfig) | optional | Configuration for sparse vectors |
+| strict_mode_config | [StrictModeConfig](#qdrant-StrictModeConfig) | optional | Configuration for strict mode |
 
 
 
@@ -683,6 +694,12 @@
 
 ### DatetimeIndexParams
 
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| on_disk | [bool](#bool) | optional | If true - store index on disk. |
+| is_principal | [bool](#bool) | optional | If true - use this key to organize storage of the collection data. This option assumes that this key will be used in majority of filtered requests. |
 
 
 
@@ -783,6 +800,12 @@
 
 
 
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| on_disk | [bool](#bool) | optional | If true - store index on disk. |
+| is_principal | [bool](#bool) | optional | If true - use this key to organize storage of the collection data. This option assumes that this key will be used in majority of filtered requests. |
+
+
 
 
 
@@ -856,8 +879,10 @@
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| lookup | [bool](#bool) |  | If true - support direct lookups. |
-| range | [bool](#bool) |  | If true - support ranges filters. |
+| lookup | [bool](#bool) | optional | If true - support direct lookups. |
+| range | [bool](#bool) | optional | If true - support ranges filters. |
+| is_principal | [bool](#bool) | optional | If true - use this key to organize storage of the collection data. This option assumes that this key will be used in majority of filtered requests. |
+| on_disk | [bool](#bool) | optional | If true - store index on disk. |
 
 
 
@@ -868,6 +893,12 @@
 
 ### KeywordIndexParams
 
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| is_tenant | [bool](#bool) | optional | If true - used for tenant optimization. |
+| on_disk | [bool](#bool) | optional | If true - store index on disk. |
 
 
 
@@ -1064,6 +1095,7 @@ Note: 1kB = 1 vector of size 256. |
 | text_index_params | [TextIndexParams](#qdrant-TextIndexParams) |  | Parameters for text index |
 | bool_index_params | [BoolIndexParams](#qdrant-BoolIndexParams) |  | Parameters for bool index |
 | datetime_index_params | [DatetimeIndexParams](#qdrant-DatetimeIndexParams) |  | Parameters for datetime index |
+| uuid_index_params | [UuidIndexParams](#qdrant-UuidIndexParams) |  | Parameters for uuid index |
 
 
 
@@ -1359,6 +1391,28 @@ Note: 1kB = 1 vector of size 256. |
 
 
 
+<a name="qdrant-StrictModeConfig"></a>
+
+### StrictModeConfig
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| enabled | [bool](#bool) | optional |  |
+| max_query_limit | [uint32](#uint32) | optional |  |
+| max_timeout | [uint32](#uint32) | optional |  |
+| unindexed_filtering_retrieve | [bool](#bool) | optional |  |
+| unindexed_filtering_update | [bool](#bool) | optional |  |
+| search_max_hnsw_ef | [uint32](#uint32) | optional |  |
+| search_allow_exact | [bool](#bool) | optional |  |
+| search_max_oversampling | [float](#float) | optional |  |
+
+
+
+
+
+
 <a name="qdrant-TextIndexParams"></a>
 
 ### TextIndexParams
@@ -1431,6 +1485,22 @@ Note: 1kB = 1 vector of size 256. |
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | result | [bool](#bool) |  |  |
+
+
+
+
+
+
+<a name="qdrant-UuidIndexParams"></a>
+
+### UuidIndexParams
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| is_tenant | [bool](#bool) | optional | If true - used for tenant optimization. |
+| on_disk | [bool](#bool) | optional | If true - store index on disk. |
 
 
 
@@ -1684,6 +1754,7 @@ Note: 1kB = 1 vector of size 256. |
 | Text | 5 |  |
 | Bool | 6 |  |
 | Datetime | 7 |  |
+| Uuid | 8 |  |
 
 
 
@@ -2105,6 +2176,7 @@ The JSON representation for `Value` is a JSON value.
 | exact | [bool](#bool) | optional | If `true` - return exact count, if `false` - return approximate count |
 | read_consistency | [ReadConsistency](#qdrant-ReadConsistency) | optional | Options for specifying read consistency guarantees |
 | shard_key_selector | [ShardKeySelector](#qdrant-ShardKeySelector) | optional | Specify in which shards to look for the points, if not specified - look in all shards |
+| timeout | [uint64](#uint64) | optional | If set, overrides global timeout setting for this request. Unit is seconds. |
 
 
 
@@ -2366,6 +2438,76 @@ The JSON representation for `Value` is a JSON value.
 
 
 
+<a name="qdrant-FacetCounts"></a>
+
+### FacetCounts
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| collection_name | [string](#string) |  | Name of the collection |
+| key | [string](#string) |  | Payload key of the facet |
+| filter | [Filter](#qdrant-Filter) | optional | Filter conditions - return only those points that satisfy the specified conditions. |
+| limit | [uint64](#uint64) | optional | Max number of facets. Default is 10. |
+| exact | [bool](#bool) | optional | If true, return exact counts, slower but useful for debugging purposes. Default is false. |
+| timeout | [uint64](#uint64) | optional | If set, overrides global timeout setting for this request. Unit is seconds. |
+| read_consistency | [ReadConsistency](#qdrant-ReadConsistency) | optional | Options for specifying read consistency guarantees |
+| shard_key_selector | [ShardKeySelector](#qdrant-ShardKeySelector) | optional | Specify in which shards to look for the points, if not specified - look in all shards |
+
+
+
+
+
+
+<a name="qdrant-FacetHit"></a>
+
+### FacetHit
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| value | [FacetValue](#qdrant-FacetValue) |  | Value from the facet |
+| count | [uint64](#uint64) |  | Number of points with this value |
+
+
+
+
+
+
+<a name="qdrant-FacetResponse"></a>
+
+### FacetResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| hits | [FacetHit](#qdrant-FacetHit) | repeated |  |
+| time | [double](#double) |  | Time spent to process |
+
+
+
+
+
+
+<a name="qdrant-FacetValue"></a>
+
+### FacetValue
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| string_value | [string](#string) |  | String value from the facet |
+| integer_value | [int64](#int64) |  | Integer value from the facet |
+
+
+
+
+
+
 <a name="qdrant-FieldCondition"></a>
 
 ### FieldCondition
@@ -2500,6 +2642,7 @@ Additionally, the first and last points of each GeoLineString must be the same.
 | with_vectors | [WithVectorsSelector](#qdrant-WithVectorsSelector) | optional | Options for specifying which vectors to include into response |
 | read_consistency | [ReadConsistency](#qdrant-ReadConsistency) | optional | Options for specifying read consistency guarantees |
 | shard_key_selector | [ShardKeySelector](#qdrant-ShardKeySelector) | optional | Specify in which shards to look for the points, if not specified - look in all shards |
+| timeout | [uint64](#uint64) | optional | If set, overrides global timeout setting for this request. Unit is seconds. |
 
 
 
@@ -3155,6 +3298,7 @@ For example, if `oversampling` is 2.4 and `limit` is 100, then 240 vectors will 
 | context | [ContextInput](#qdrant-ContextInput) |  | Return points that live in positive areas. |
 | order_by | [OrderBy](#qdrant-OrderBy) |  | Order the points by a payload field. |
 | fusion | [Fusion](#qdrant-Fusion) |  | Fuse the results of multiple prefetches. |
+| sample | [Sample](#qdrant-Sample) |  | Sample points from the collection. |
 
 
 
@@ -3189,6 +3333,53 @@ For example, if `oversampling` is 2.4 and `limit` is 100, then 240 vectors will 
 | ----- | ---- | ----- | ----------- |
 | result | [BatchResult](#qdrant-BatchResult) | repeated |  |
 | time | [double](#double) |  | Time spent to process |
+
+
+
+
+
+
+<a name="qdrant-QueryGroupsResponse"></a>
+
+### QueryGroupsResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| result | [GroupsResult](#qdrant-GroupsResult) |  |  |
+| time | [double](#double) |  | Time spent to process |
+
+
+
+
+
+
+<a name="qdrant-QueryPointGroups"></a>
+
+### QueryPointGroups
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| collection_name | [string](#string) |  | Name of the collection |
+| prefetch | [PrefetchQuery](#qdrant-PrefetchQuery) | repeated | Sub-requests to perform first. If present, the query will be performed on the results of the prefetches. |
+| query | [Query](#qdrant-Query) | optional | Query to perform. If missing, returns points ordered by their IDs. |
+| using | [string](#string) | optional | Define which vector to use for querying. If missing, the default vector is used. |
+| filter | [Filter](#qdrant-Filter) | optional | Filter conditions - return only those points that satisfy the specified conditions. |
+| params | [SearchParams](#qdrant-SearchParams) | optional | Search params for when there is no prefetch. |
+| score_threshold | [float](#float) | optional | Return points with scores better than this threshold. |
+| with_payload | [WithPayloadSelector](#qdrant-WithPayloadSelector) |  | Options for specifying which payload to include or not |
+| with_vectors | [WithVectorsSelector](#qdrant-WithVectorsSelector) | optional | Options for specifying which vectors to include into response |
+| lookup_from | [LookupLocation](#qdrant-LookupLocation) | optional | The location to use for IDs lookup, if not specified - use the current collection and the &#39;using&#39; vector |
+| limit | [uint64](#uint64) | optional | Max number of points. Default is 3. |
+| group_size | [uint64](#uint64) | optional | Maximum amount of points to return per group. Default to 10. |
+| group_by | [string](#string) |  | Payload field to group by, must be a string or number field. If there are multiple values for the field, all of them will be used. One point can be in multiple groups. |
+| read_consistency | [ReadConsistency](#qdrant-ReadConsistency) | optional | Options for specifying read consistency guarantees |
+| with_lookup | [WithLookup](#qdrant-WithLookup) | optional | Options for specifying how to use the group id to lookup points in another collection |
+| timeout | [uint64](#uint64) | optional | If set, overrides global timeout setting for this request. Unit is seconds. |
+| shard_key_selector | [ShardKeySelector](#qdrant-ShardKeySelector) | optional | Specify in which shards to look for the points, if not specified - look in all shards |
 
 
 
@@ -3542,6 +3733,7 @@ For example, if `oversampling` is 2.4 and `limit` is 100, then 240 vectors will 
 | read_consistency | [ReadConsistency](#qdrant-ReadConsistency) | optional | Options for specifying read consistency guarantees |
 | shard_key_selector | [ShardKeySelector](#qdrant-ShardKeySelector) | optional | Specify in which shards to look for the points, if not specified - look in all shards |
 | order_by | [OrderBy](#qdrant-OrderBy) | optional | Order the records by a payload field |
+| timeout | [uint64](#uint64) | optional | If set, overrides global timeout setting for this request. Unit is seconds. |
 
 
 
@@ -4104,6 +4296,7 @@ Vector type to be used in queries. Ids will be substituted with their correspond
 | FieldTypeText | 4 |  |
 | FieldTypeBool | 5 |  |
 | FieldTypeDatetime | 6 |  |
+| FieldTypeUuid | 7 |  |
 
 
 
@@ -4115,6 +4308,7 @@ Vector type to be used in queries. Ids will be substituted with their correspond
 | Name | Number | Description |
 | ---- | ------ | ----------- |
 | RRF | 0 | Reciprocal Rank Fusion |
+| DBSF | 1 | Distribution-Based Score Fusion |
 
 
 
@@ -4140,6 +4334,21 @@ How to use positive and negative vectors to find the results, default is `Averag
 | ---- | ------ | ----------- |
 | AverageVector | 0 | Average positive and negative vectors and create a single query with the formula `query = avg_pos &#43; avg_pos - avg_neg`. Then performs normal search. |
 | BestScore | 1 | Uses custom search objective. Each candidate is compared against all examples, its score is then chosen from the `max(max_pos_score, max_neg_score)`. If the `max_neg_score` is chosen then it is squared and negated. |
+
+
+
+<a name="qdrant-Sample"></a>
+
+### Sample
+Sample points from the collection
+
+Available sampling methods:
+
+* `random` - Random sampling
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| Random | 0 |  |
 
 
 
@@ -4227,6 +4436,8 @@ When using target (with or without context), the score behaves a little differen
 | UpdateBatch | [UpdateBatchPoints](#qdrant-UpdateBatchPoints) | [UpdateBatchResponse](#qdrant-UpdateBatchResponse) | Perform multiple update operations in one request |
 | Query | [QueryPoints](#qdrant-QueryPoints) | [QueryResponse](#qdrant-QueryResponse) | Universally query points. This endpoint covers all capabilities of search, recommend, discover, filters. But also enables hybrid and multi-stage queries. |
 | QueryBatch | [QueryBatchPoints](#qdrant-QueryBatchPoints) | [QueryBatchResponse](#qdrant-QueryBatchResponse) | Universally query points in a batch fashion. This endpoint covers all capabilities of search, recommend, discover, filters. But also enables hybrid and multi-stage queries. |
+| QueryGroups | [QueryPointGroups](#qdrant-QueryPointGroups) | [QueryGroupsResponse](#qdrant-QueryGroupsResponse) | Universally query points in a group fashion. This endpoint covers all capabilities of search, recommend, discover, filters. But also enables hybrid and multi-stage queries. |
+| Facet | [FacetCounts](#qdrant-FacetCounts) | [FacetResponse](#qdrant-FacetResponse) | Perform facet counts. For each value in the field, count the number of points that have this value and match the conditions. |
 
  
 

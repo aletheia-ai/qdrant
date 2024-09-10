@@ -15,12 +15,12 @@ use tokio::sync::{broadcast, RwLock};
 
 use super::replica_set::AbortShardTransfer;
 use super::resharding::tasks_pool::ReshardTasksPool;
-use super::resharding::ReshardState;
+use super::resharding::{ReshardStage, ReshardState};
 use super::transfer::transfer_tasks_pool::TransferTasksPool;
 use crate::collection::payload_index_schema::PayloadIndexSchema;
 use crate::common::validate_snapshot_archive::validate_open_snapshot_archive;
 use crate::config::{CollectionConfig, ShardingMethod};
-use crate::hash_ring::HashRing;
+use crate::hash_ring::HashRingRouter;
 use crate::operations::shard_selector_internal::ShardSelectorInternal;
 use crate::operations::shared_storage_config::SharedStorageConfig;
 use crate::operations::snapshot_ops::SnapshotDescription;
@@ -50,7 +50,7 @@ pub struct ShardHolder {
     pub(crate) shard_transfers: SaveOnDisk<HashSet<ShardTransfer>>,
     pub(crate) shard_transfer_changes: broadcast::Sender<ShardTransferChange>,
     pub(crate) resharding_state: SaveOnDisk<Option<ReshardState>>,
-    pub(crate) rings: HashMap<Option<ShardKey>, HashRing>,
+    pub(crate) rings: HashMap<Option<ShardKey>, HashRingRouter>,
     key_mapping: SaveOnDisk<ShardKeyMapping>,
     // Duplicates the information from `key_mapping` for faster access
     // Do not require locking
@@ -77,14 +77,7 @@ impl ShardHolder {
             }
         }
 
-        let mut rings = HashMap::from([(None, HashRing::single())]);
-
-        if let Some(shard_id) = resharding_state.read().clone().map(|state| state.shard_id) {
-            rings.insert(
-                shard_id_to_key_mapping.get(&shard_id).cloned(),
-                HashRing::resharding(shard_id),
-            );
-        }
+        let rings = HashMap::from([(None, HashRingRouter::single())]);
 
         let (shard_transfer_changes, _) = broadcast::channel(64);
 
@@ -113,12 +106,34 @@ impl ShardHolder {
         self.key_mapping.read().clone()
     }
 
-    async fn drop_and_remove_shard(&mut self, shard_id: ShardId) -> Result<(), CollectionError> {
+    pub async fn drop_and_remove_shard(
+        &mut self,
+        shard_id: ShardId,
+    ) -> Result<(), CollectionError> {
         if let Some(replica_set) = self.shards.remove(&shard_id) {
             let shard_path = replica_set.shard_path.clone();
             drop(replica_set);
             tokio::fs::remove_dir_all(shard_path).await?;
         }
+        Ok(())
+    }
+
+    pub fn remove_shard_from_key_mapping(
+        &mut self,
+        shard_id: &ShardId,
+        shard_key: &ShardKey,
+    ) -> Result<(), CollectionError> {
+        self.key_mapping.write_optional(|key_mapping| {
+            if !key_mapping.contains_key(shard_key) {
+                return None;
+            }
+
+            let mut key_mapping = key_mapping.clone();
+            key_mapping.get_mut(shard_key).unwrap().remove(shard_id);
+            Some(key_mapping)
+        })?;
+        self.shard_id_to_key_mapping.remove(shard_id);
+
         Ok(())
     }
 
@@ -131,7 +146,7 @@ impl ShardHolder {
         self.shards.insert(shard_id, shard);
         self.rings
             .entry(shard_key.clone())
-            .or_insert_with(HashRing::single)
+            .or_insert_with(HashRingRouter::single)
             .add(shard_id);
 
         if let Some(shard_key) = shard_key {
@@ -182,13 +197,13 @@ impl ShardHolder {
     fn rebuild_rings(&mut self) {
         // TODO(resharding): Correctly rebuild resharding hashrings!
 
-        let mut rings = HashMap::from([(None, HashRing::single())]);
+        let mut rings = HashMap::from([(None, HashRingRouter::single())]);
         let ids_to_key = self.get_shard_id_to_key_mapping();
         for shard_id in self.shards.keys() {
             let shard_key = ids_to_key.get(shard_id).cloned();
             rings
                 .entry(shard_key)
-                .or_insert_with(HashRing::single)
+                .or_insert_with(HashRingRouter::single)
                 .add(*shard_id);
         }
 
@@ -365,8 +380,8 @@ impl ShardHolder {
         let (mut incoming, mut outgoing) = (0, 0);
 
         for transfer in self.shard_transfers.read().iter() {
-            incoming += (transfer.to == *peer_id) as usize;
-            outgoing += (transfer.from == *peer_id) as usize;
+            incoming += usize::from(transfer.to == *peer_id);
+            outgoing += usize::from(transfer.from == *peer_id);
         }
 
         (incoming, outgoing)
@@ -412,6 +427,7 @@ impl ShardHolder {
             resharding_operations.push(ReshardingInfo {
                 shard_id: resharding_state.shard_id,
                 peer_id: resharding_state.peer_id,
+                direction: resharding_state.direction,
                 shard_key: resharding_state.shard_key.clone(),
                 comment: status.map(|p| p.comment),
             });
@@ -452,15 +468,14 @@ impl ShardHolder {
             }
             ShardSelectorInternal::All => {
                 for (&shard_id, shard) in self.shards.iter() {
-                    // TODO(resharding): Handle resharded shard!?
-
-                    let is_resharding = self
-                        .resharding_state
-                        .read()
-                        .clone()
-                        .map_or(false, |state| state.shard_id == shard_id);
-
-                    if is_resharding {
+                    // Ignore a new resharding shard until it completed point migration
+                    // The shard will be marked as active at the end of the migration stage
+                    let resharding_migrating =
+                        self.resharding_state.read().clone().map_or(false, |state| {
+                            state.shard_id == shard_id
+                                && state.stage < ReshardStage::ReadHashRingCommitted
+                        });
+                    if resharding_migrating {
                         continue;
                     }
 
@@ -585,6 +600,7 @@ impl ShardHolder {
                             shared_storage_config.clone(),
                             payload_index_schema.clone(),
                             update_runtime.clone(),
+                            search_runtime.clone(),
                             optimizer_cpu_budget.clone(),
                         )
                         .await
@@ -612,6 +628,7 @@ impl ShardHolder {
                             shared_storage_config.clone(),
                             payload_index_schema.clone(),
                             update_runtime.clone(),
+                            search_runtime.clone(),
                             optimizer_cpu_budget.clone(),
                         )
                         .await
@@ -652,6 +669,13 @@ impl ShardHolder {
                 let shard_key = shard_id_to_key_mapping.get(&shard_id).cloned();
                 self.add_shard(shard_id, replica_set, shard_key).unwrap();
             }
+        }
+
+        // After loading shards, recover the resharding hash ring state
+        if let Some(state) = self.resharding_state.read().clone() {
+            self.rings
+                .entry(state.shard_key)
+                .and_modify(|ring| ring.start_resharding(state.shard_id, state.direction));
         }
     }
 
@@ -770,7 +794,7 @@ impl ShardHolder {
     ) -> CollectionResult<Vec<SnapshotDescription>> {
         self.assert_shard_is_local(shard_id).await?;
 
-        let snapshots_path = self.snapshots_path_for_shard_unchecked(snapshots_path, shard_id);
+        let snapshots_path = Self::snapshots_path_for_shard_unchecked(snapshots_path, shard_id);
 
         if !snapshots_path.exists() {
             return Ok(Vec::new());
@@ -871,7 +895,7 @@ impl ShardHolder {
         let temp_file = task_result??;
 
         let snapshot_path =
-            self.shard_snapshot_path_unchecked(snapshots_path, shard_id, snapshot_file_name)?;
+            Self::shard_snapshot_path_unchecked(snapshots_path, shard_id, snapshot_file_name)?;
 
         let snapshot_manager = shard.get_snapshots_storage_manager()?;
         let snapshot_description = snapshot_manager
@@ -994,24 +1018,19 @@ impl ShardHolder {
         snapshot_file_name: impl AsRef<Path>,
     ) -> CollectionResult<PathBuf> {
         self.assert_shard_is_local_or_queue_proxy(shard_id).await?;
-        self.shard_snapshot_path_unchecked(snapshots_path, shard_id, snapshot_file_name)
+        Self::shard_snapshot_path_unchecked(snapshots_path, shard_id, snapshot_file_name)
     }
 
-    fn snapshots_path_for_shard_unchecked(
-        &self,
-        snapshots_path: &Path,
-        shard_id: ShardId,
-    ) -> PathBuf {
+    fn snapshots_path_for_shard_unchecked(snapshots_path: &Path, shard_id: ShardId) -> PathBuf {
         snapshots_path.join(format!("shards/{shard_id}"))
     }
 
     fn shard_snapshot_path_unchecked(
-        &self,
         snapshots_path: &Path,
         shard_id: ShardId,
         snapshot_file_name: impl AsRef<Path>,
     ) -> CollectionResult<PathBuf> {
-        let snapshots_path = self.snapshots_path_for_shard_unchecked(snapshots_path, shard_id);
+        let snapshots_path = Self::snapshots_path_for_shard_unchecked(snapshots_path, shard_id);
 
         let snapshot_file_name = snapshot_file_name.as_ref();
 

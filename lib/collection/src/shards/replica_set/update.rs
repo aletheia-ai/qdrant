@@ -324,7 +324,7 @@ impl ShardReplicaSet {
         // 3. ???
 
         let failure_error = if let Some((peer_id, collection_error)) = failures.first() {
-            format!("Failed peer: {}, error: {}", peer_id, collection_error)
+            format!("Failed peer: {peer_id}, error: {collection_error}")
         } else {
             "".to_string()
         };
@@ -579,6 +579,7 @@ mod tests {
             wal_config,
             hnsw_config: Default::default(),
             quantization_config: None,
+            strict_mode_config: None,
         };
 
         let payload_index_schema_dir = Builder::new().prefix("qdrant-test").tempdir().unwrap();

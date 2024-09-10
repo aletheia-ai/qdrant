@@ -1,12 +1,11 @@
 //! Types used within `LocalShard` to represent a planned `ShardQueryRequest`
 
-use api::rest::OrderByInterface;
 use common::types::ScoreType;
 use segment::types::{Filter, WithPayloadInterface, WithVector};
 
-use super::shard_query::{ScoringQuery, ShardPrefetch, ShardQueryRequest};
+use super::shard_query::{Sample, ScoringQuery, ShardPrefetch, ShardQueryRequest};
 use crate::operations::types::{
-    CollectionError, CollectionResult, CoreSearchRequest, QueryScrollRequestInternal,
+    CollectionError, CollectionResult, CoreSearchRequest, QueryScrollRequestInternal, ScrollOrder,
 };
 
 const MAX_PREFETCH_DEPTH: usize = 64;
@@ -96,8 +95,7 @@ impl PlannedQuery {
         let merge_plan = if !prefetches.is_empty() {
             if depth > MAX_PREFETCH_DEPTH {
                 return Err(CollectionError::bad_request(format!(
-                    "prefetches depth {} exceeds max depth {}",
-                    depth, MAX_PREFETCH_DEPTH
+                    "prefetches depth {depth} exceeds max depth {MAX_PREFETCH_DEPTH}"
                 )));
             }
 
@@ -171,7 +169,22 @@ impl PlannedQuery {
                 Some(ScoringQuery::OrderBy(order_by)) => {
                     // Everything should come from 1 scroll
                     let scroll = QueryScrollRequestInternal {
-                        order_by: Some(OrderByInterface::Struct(order_by)),
+                        scroll_order: ScrollOrder::ByField(order_by),
+                        limit,
+                        filter,
+                        with_vector,
+                        with_payload,
+                    };
+
+                    let idx = self.scrolls.len();
+                    self.scrolls.push(scroll);
+
+                    vec![Source::ScrollsIdx(idx)]
+                }
+                Some(ScoringQuery::Sample(Sample::Random)) => {
+                    // Everything should come from 1 scroll
+                    let scroll = QueryScrollRequestInternal {
+                        scroll_order: ScrollOrder::Random,
                         limit,
                         filter,
                         with_vector,
@@ -186,7 +199,7 @@ impl PlannedQuery {
                 None => {
                     // Everything should come from 1 scroll
                     let scroll = QueryScrollRequestInternal {
-                        order_by: None,
+                        scroll_order: ScrollOrder::ById,
                         limit,
                         filter,
                         with_vector,
@@ -299,7 +312,21 @@ fn recurse_prefetches(
                 }
                 Some(ScoringQuery::OrderBy(order_by)) => {
                     let scroll = QueryScrollRequestInternal {
-                        order_by: Some(OrderByInterface::Struct(order_by)),
+                        scroll_order: ScrollOrder::ByField(order_by),
+                        filter,
+                        with_vector: with_vector.clone(),
+                        with_payload: with_payload.clone(),
+                        limit,
+                    };
+
+                    let idx = scrolls.len();
+                    scrolls.push(scroll);
+
+                    Source::ScrollsIdx(idx)
+                }
+                Some(ScoringQuery::Sample(Sample::Random)) => {
+                    let scroll = QueryScrollRequestInternal {
+                        scroll_order: ScrollOrder::Random,
                         filter,
                         with_vector: with_vector.clone(),
                         with_payload: with_payload.clone(),
@@ -313,7 +340,7 @@ fn recurse_prefetches(
                 }
                 None => {
                     let scroll = QueryScrollRequestInternal {
-                        order_by: None,
+                        scroll_order: Default::default(),
                         filter,
                         with_vector: with_vector.clone(),
                         with_payload: with_payload.clone(),
@@ -647,7 +674,7 @@ mod tests {
         let dummy_filter = Some(Filter::new_must(Condition::Field(
             FieldCondition::new_match(
                 "my_key".try_into().unwrap(),
-                Match::new_value(segment::types::ValueVariants::Keyword("hello".to_string())),
+                Match::new_value(segment::types::ValueVariants::String("hello".to_string())),
             ),
         )));
 
@@ -817,7 +844,7 @@ mod tests {
     fn dummy_core_prefetch(limit: usize) -> ShardPrefetch {
         ShardPrefetch {
             prefetches: vec![],
-            query: nearest_query(),
+            query: Some(nearest_query()),
             filter: None,
             params: None,
             limit,
@@ -836,10 +863,10 @@ mod tests {
         }
     }
 
-    fn nearest_query() -> Option<ScoringQuery> {
-        Some(ScoringQuery::Vector(QueryEnum::Nearest(
-            NamedVectorStruct::Default(vec![0.1, 0.2, 0.3, 0.4]),
-        )))
+    fn nearest_query() -> ScoringQuery {
+        ScoringQuery::Vector(QueryEnum::Nearest(NamedVectorStruct::Default(vec![
+            0.1, 0.2, 0.3, 0.4,
+        ])))
     }
 
     #[test]
@@ -848,7 +875,7 @@ mod tests {
             // A no-prefetch core_search query
             ShardQueryRequest {
                 prefetches: vec![],
-                query: nearest_query(),
+                query: Some(nearest_query()),
                 filter: None,
                 score_threshold: None,
                 limit: 10,

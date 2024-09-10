@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use common::types::TelemetryDetail;
+use segment::data_types::facets::{FacetParams, FacetResponse};
 use segment::data_types::order_by::OrderBy;
 use segment::types::{
     ExtendedPointId, Filter, PointIdType, ScoredPoint, WithPayload, WithPayloadInterface,
@@ -14,7 +15,7 @@ use tokio::sync::Mutex;
 
 use super::shard::ShardId;
 use super::update_tracker::UpdateTracker;
-use crate::hash_ring::HashRing;
+use crate::hash_ring::HashRingRouter;
 use crate::operations::point_ops::{
     PointInsertOperationsInternal, PointOperations, PointStruct, PointSyncOperation,
 };
@@ -42,7 +43,7 @@ pub struct ForwardProxyShard {
     shard_id: ShardId,
     pub(crate) wrapped_shard: LocalShard,
     pub(crate) remote_shard: RemoteShard,
-    resharding_hash_ring: Option<HashRing>,
+    resharding_hash_ring: Option<HashRingRouter>,
     /// Lock required to protect transfer-in-progress updates.
     /// It should block data updating operations while the batch is being transferred.
     update_lock: Mutex<()>,
@@ -53,7 +54,7 @@ impl ForwardProxyShard {
         shard_id: ShardId,
         wrapped_shard: LocalShard,
         remote_shard: RemoteShard,
-        resharding_hash_ring: Option<HashRing>,
+        resharding_hash_ring: Option<HashRingRouter>,
     ) -> Self {
         // Validate that `ForwardProxyShard` initialized correctly
 
@@ -115,7 +116,7 @@ impl ForwardProxyShard {
         &self,
         offset: Option<PointIdType>,
         batch_size: usize,
-        hashring_filter: Option<&HashRing>,
+        hashring_filter: Option<&HashRingRouter>,
         merge_points: bool,
         runtime_handle: &Handle,
     ) -> CollectionResult<Option<PointIdType>> {
@@ -132,6 +133,7 @@ impl ForwardProxyShard {
                 None,
                 runtime_handle,
                 None,
+                None, // no timeout
             )
             .await?;
         let next_page_offset = if batch.len() < limit {
@@ -319,6 +321,7 @@ impl ShardOperation for ForwardProxyShard {
         filter: Option<&Filter>,
         search_runtime_handle: &Handle,
         order_by: Option<&OrderBy>,
+        timeout: Option<Duration>,
     ) -> CollectionResult<Vec<Record>> {
         let local_shard = &self.wrapped_shard;
         local_shard
@@ -330,6 +333,7 @@ impl ShardOperation for ForwardProxyShard {
                 filter,
                 search_runtime_handle,
                 order_by,
+                timeout,
             )
             .await
     }
@@ -350,9 +354,16 @@ impl ShardOperation for ForwardProxyShard {
             .await
     }
 
-    async fn count(&self, request: Arc<CountRequestInternal>) -> CollectionResult<CountResult> {
+    async fn count(
+        &self,
+        request: Arc<CountRequestInternal>,
+        search_runtime_handle: &Handle,
+        timeout: Option<Duration>,
+    ) -> CollectionResult<CountResult> {
         let local_shard = &self.wrapped_shard;
-        local_shard.count(request).await
+        local_shard
+            .count(request, search_runtime_handle, timeout)
+            .await
     }
 
     async fn retrieve(
@@ -360,10 +371,18 @@ impl ShardOperation for ForwardProxyShard {
         request: Arc<PointRequestInternal>,
         with_payload: &WithPayload,
         with_vector: &WithVector,
+        search_runtime_handle: &Handle,
+        timeout: Option<Duration>,
     ) -> CollectionResult<Vec<Record>> {
         let local_shard = &self.wrapped_shard;
         local_shard
-            .retrieve(request, with_payload, with_vector)
+            .retrieve(
+                request,
+                with_payload,
+                with_vector,
+                search_runtime_handle,
+                timeout,
+            )
             .await
     }
 
@@ -376,6 +395,18 @@ impl ShardOperation for ForwardProxyShard {
         let local_shard = &self.wrapped_shard;
         local_shard
             .query_batch(requests, search_runtime_handle, timeout)
+            .await
+    }
+
+    async fn facet(
+        &self,
+        request: Arc<FacetParams>,
+        search_runtime_handle: &Handle,
+        timeout: Option<Duration>,
+    ) -> CollectionResult<FacetResponse> {
+        let local_shard = &self.wrapped_shard;
+        local_shard
+            .facet(request, search_runtime_handle, timeout)
             .await
     }
 }

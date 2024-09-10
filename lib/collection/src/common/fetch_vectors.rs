@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
+use std::time::Duration;
 
 use api::rest::ShardKeySelector;
 use futures::future::try_join_all;
@@ -27,6 +28,7 @@ pub async fn retrieve_points(
     vector_names: Vec<String>,
     read_consistency: Option<ReadConsistency>,
     shard_selector: &ShardSelectorInternal,
+    timeout: Option<Duration>,
 ) -> CollectionResult<Vec<Record>> {
     collection
         .retrieve(
@@ -37,6 +39,7 @@ pub async fn retrieve_points(
             },
             read_consistency,
             shard_selector,
+            timeout,
         )
         .await
 }
@@ -52,6 +55,7 @@ pub async fn retrieve_points_with_locked_collection(
     vector_names: Vec<String>,
     read_consistency: Option<ReadConsistency>,
     shard_selector: &ShardSelectorInternal,
+    timeout: Option<Duration>,
 ) -> CollectionResult<Vec<Record>> {
     match collection_holder {
         CollectionRefHolder::Ref(collection) => {
@@ -61,11 +65,20 @@ pub async fn retrieve_points_with_locked_collection(
                 vector_names,
                 read_consistency,
                 shard_selector,
+                timeout,
             )
             .await
         }
         CollectionRefHolder::Guard(guard) => {
-            retrieve_points(&guard, ids, vector_names, read_consistency, shard_selector).await
+            retrieve_points(
+                &guard,
+                ids,
+                vector_names,
+                read_consistency,
+                shard_selector,
+                timeout,
+            )
+            .await
         }
     }
 }
@@ -126,13 +139,13 @@ impl ReferencedVectors {
 
     pub fn get(
         &self,
-        lookup_collection_name: &Option<&CollectionName>,
+        lookup_collection_name: Option<&CollectionName>,
         point_id: PointIdType,
     ) -> Option<&Record> {
         match lookup_collection_name {
             None => self.default_mapping.get(&point_id),
             Some(collection) => {
-                let collection_mapping = self.collection_mapping.get(*collection)?;
+                let collection_mapping = self.collection_mapping.get(collection)?;
                 collection_mapping.get(&point_id)
             }
         }
@@ -149,7 +162,7 @@ impl ReferencedVectors {
         match vector_input {
             VectorInput::Vector(vector) => Some(vector),
             VectorInput::Id(vid) => {
-                let rec = self.get(&collection_name, vid)?;
+                let rec = self.get(collection_name, vid)?;
                 rec.get_vector_by_name(vector_name).map(|v| v.to_owned())
             }
         }
@@ -193,6 +206,7 @@ impl<'coll_name> ReferencedPoints<'coll_name> {
         read_consistency: Option<ReadConsistency>,
         collection_by_name: &F,
         shard_selector: ShardSelectorInternal,
+        timeout: Option<Duration>,
     ) -> CollectionResult<ReferencedVectors>
     where
         F: Fn(String) -> Fut,
@@ -202,7 +216,7 @@ impl<'coll_name> ReferencedPoints<'coll_name> {
 
         let mut collections_names = Vec::new();
         let mut vector_retrieves = Vec::new();
-        for (collection_name, reference_vectors_ids) in self.ids_per_collection.into_iter() {
+        for (collection_name, reference_vectors_ids) in self.ids_per_collection {
             collections_names.push(collection_name);
             let points: Vec<_> = reference_vectors_ids.into_iter().collect();
             let vector_names: Vec<_> = self
@@ -218,6 +232,7 @@ impl<'coll_name> ReferencedPoints<'coll_name> {
                     vector_names,
                     read_consistency,
                     &shard_selector,
+                    timeout,
                 )),
                 Some(name) => {
                     let other_collection = collection_by_name(name.to_string()).await;
@@ -229,6 +244,7 @@ impl<'coll_name> ReferencedPoints<'coll_name> {
                                 vector_names,
                                 read_consistency,
                                 &shard_selector,
+                                timeout,
                             ))
                         }
                         None => {
@@ -270,7 +286,7 @@ pub fn convert_to_vectors_owned(
             RecommendExample::Dense(vector) => Some(vector.into()),
             RecommendExample::Sparse(vector) => Some(vector.into()),
             RecommendExample::PointId(vid) => {
-                let rec = all_vectors_records_map.get(&collection_name, vid).unwrap();
+                let rec = all_vectors_records_map.get(collection_name, vid).unwrap();
                 rec.get_vector_by_name(vector_name).map(|v| v.to_owned())
             }
         })
@@ -287,7 +303,7 @@ pub fn convert_to_vectors<'a>(
         RecommendExample::Dense(vector) => Some(vector.into()),
         RecommendExample::Sparse(vector) => Some(vector.into()),
         RecommendExample::PointId(vid) => {
-            let rec = all_vectors_records_map.get(&collection_name, *vid).unwrap();
+            let rec = all_vectors_records_map.get(collection_name, *vid).unwrap();
             rec.get_vector_by_name(vector_name)
         }
     })
@@ -298,6 +314,7 @@ pub async fn resolve_referenced_vectors_batch<'a, 'b, F, Fut, Req: RetrieveReque
     collection: &Collection,
     collection_by_name: F,
     read_consistency: Option<ReadConsistency>,
+    timeout: Option<Duration>,
 ) -> CollectionResult<ReferencedVectors>
 where
     F: Fn(String) -> Fut,
@@ -336,6 +353,7 @@ where
                 read_consistency,
                 &collection_by_name,
                 shard_selector,
+                timeout,
             );
             requests.push(fetch);
             Ok(())

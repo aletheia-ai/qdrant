@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::mem::take;
 
 use api::rest::LookupLocation;
+use collection::collection::distance_matrix::CollectionSearchMatrixRequest;
 use collection::grouping::group_by::{GroupRequest, SourceRequest};
 use collection::lookup::WithLookup;
 use collection::operations::payload_ops::{DeletePayloadOp, PayloadOps, SetPayloadOp};
@@ -16,6 +17,7 @@ use collection::operations::universal_query::collection_query::{
 };
 use collection::operations::vector_ops::VectorOperations;
 use collection::operations::CollectionUpdateOperations;
+use segment::data_types::facets::FacetParams;
 use segment::types::{Condition, ExtendedPointId, FieldCondition, Filter, Match, Payload};
 
 use super::{
@@ -23,7 +25,7 @@ use super::{
     CollectionAccessView, CollectionPass, PayloadConstraint,
 };
 use crate::content_manager::collection_meta_ops::CollectionMetaOperations;
-use crate::content_manager::errors::StorageError;
+use crate::content_manager::errors::{StorageError, StorageResult};
 
 impl Access {
     #[allow(private_bounds)]
@@ -365,6 +367,44 @@ fn check_access_for_prefetch(
     Ok(())
 }
 
+impl CheckableCollectionOperation for FacetParams {
+    fn access_requirements(&self) -> AccessRequirements {
+        AccessRequirements {
+            write: false,
+            manage: false,
+            whole: false,
+        }
+    }
+
+    fn check_access(
+        &mut self,
+        view: CollectionAccessView<'_>,
+        _access: &CollectionAccessList,
+    ) -> StorageResult<()> {
+        view.apply_filter(&mut self.filter);
+        Ok(())
+    }
+}
+
+impl CheckableCollectionOperation for CollectionSearchMatrixRequest {
+    fn access_requirements(&self) -> AccessRequirements {
+        AccessRequirements {
+            write: false,
+            manage: false,
+            whole: false,
+        }
+    }
+
+    fn check_access(
+        &mut self,
+        view: CollectionAccessView<'_>,
+        _access: &CollectionAccessList,
+    ) -> StorageResult<()> {
+        view.apply_filter(&mut self.filter);
+        Ok(())
+    }
+}
+
 impl CheckableCollectionOperation for CollectionUpdateOperations {
     fn access_requirements(&self) -> AccessRequirements {
         match self {
@@ -537,7 +577,7 @@ impl PayloadConstraint {
     }
 
     fn make_payload(&self, collection_name: &str) -> Result<Payload, StorageError> {
-        // TODO: We need to construct a payload, then validate it against the claim
+        let _ = self; // TODO: We need to construct a payload, then validate it against the claim
         incompatible_with_payload_constraint(collection_name) // Reject as not implemented
     }
 }

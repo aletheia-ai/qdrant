@@ -1,12 +1,10 @@
-use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 //use atomic_refcell::{AtomicRef, AtomicRefCell};
 use rocksdb::{ColumnFamily, DBRecoveryMode, LogLevel, Options, WriteOptions, DB};
 
-use super::rocksdb_buffered_delete_wrapper::DatabaseColumnScheduledDeleteWrapperIterator;
 //use crate::common::arc_rwlock_iterator::ArcRwLockIterator;
 use crate::common::operation_error::{OperationError, OperationResult};
 use crate::common::Flusher;
@@ -51,6 +49,7 @@ pub fn db_options() -> Options {
     options.set_delete_obsolete_files_period_micros(DB_DELETE_OBSOLETE_FILES_PERIOD);
     options.create_missing_column_families(true);
     options.set_max_open_files(DB_MAX_OPEN_FILES as i32);
+    options.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
     // Qdrant relies on it's own WAL for durability
     options.set_wal_recovery_mode(DBRecoveryMode::TolerateCorruptedTailRecords);
@@ -245,19 +244,8 @@ impl DatabaseColumnWrapper {
 }
 
 impl<'a> LockedDatabaseColumnWrapper<'a> {
-    pub fn iter(&'a self) -> OperationResult<DatabaseColumnIterator> {
+    pub fn iter(&self) -> OperationResult<DatabaseColumnIterator> {
         DatabaseColumnIterator::new(&self.guard, self.column_name)
-    }
-
-    pub fn iter_pending_deletes(
-        &'a self,
-        pending_deletes: Arc<Mutex<HashSet<Vec<u8>>>>,
-    ) -> OperationResult<DatabaseColumnScheduledDeleteWrapperIterator> {
-        DatabaseColumnScheduledDeleteWrapperIterator::new(
-            &self.guard,
-            self.column_name,
-            pending_deletes,
-        )
     }
 }
 

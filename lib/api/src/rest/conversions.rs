@@ -1,8 +1,12 @@
 use segment::data_types::order_by::OrderBy;
 use segment::data_types::vectors::DEFAULT_VECTOR_NAME;
+use uuid::Uuid;
 
 use super::schema::{BatchVectorStruct, ScoredPoint, Vector, VectorStruct};
-use super::{NearestQuery, OrderByInterface, Query, QueryInterface};
+use super::{
+    FacetRequestInternal, FacetResponse, FacetValue, FacetValueHit, NearestQuery, OrderByInterface,
+    Query, QueryInterface,
+};
 use crate::rest::{DenseVector, NamedVectorStruct};
 
 impl From<segment::data_types::vectors::Vector> for Vector {
@@ -28,6 +32,10 @@ impl From<Vector> for segment::data_types::vectors::Vector {
                 segment::data_types::vectors::Vector::MultiDense(
                     segment::data_types::vectors::MultiDenseVectorInternal::new_unchecked(vector),
                 )
+            }
+            Vector::Document(_) => {
+                // If this is reached, it means validation failed
+                unimplemented!("Document inference is not implemented, please use vectors instead")
             }
         }
     }
@@ -65,6 +73,10 @@ impl From<VectorStruct> for segment::data_types::vectors::VectorStructInternal {
                     vectors.into_iter().map(|(k, v)| (k, v.into())).collect(),
                 )
             }
+            VectorStruct::Document(_) => {
+                // If this is reached, it means validation failed
+                unimplemented!("Document inference is not implemented, please use vectors instead")
+            }
         }
     }
 }
@@ -95,6 +107,10 @@ impl<'a> From<VectorStruct> for segment::data_types::named_vectors::NamedVectors
                     named_vector.insert(name, segment::data_types::vectors::Vector::from(vector));
                 }
                 named_vector
+            }
+            VectorStruct::Document(_) => {
+                // If this is reached, it means validation failed
+                unimplemented!("Document inference is not implemented, please use vectors instead")
             }
         }
     }
@@ -149,6 +165,10 @@ impl From<BatchVectorStruct> for segment::data_types::vectors::BatchVectorStruct
                         .map(|(k, v)| (k, v.into_iter().map(|v| v.into()).collect()))
                         .collect(),
                 )
+            }
+            BatchVectorStruct::Document(_) => {
+                // If this is reached, it means validation failed
+                unimplemented!("Document inference is not implemented, please use vectors instead")
             }
         }
     }
@@ -228,6 +248,46 @@ impl From<QueryInterface> for Query {
         match value {
             QueryInterface::Nearest(vector) => Query::Nearest(NearestQuery { nearest: vector }),
             QueryInterface::Query(query) => query,
+        }
+    }
+}
+
+impl From<segment::data_types::facets::FacetValue> for FacetValue {
+    fn from(value: segment::data_types::facets::FacetValue) -> Self {
+        match value {
+            segment::data_types::facets::FacetValue::Keyword(keyword) => Self::String(keyword),
+            segment::data_types::facets::FacetValue::Int(integer) => Self::Integer(integer),
+            segment::data_types::facets::FacetValue::Uuid(uuid_int) => {
+                Self::String(Uuid::from_u128(uuid_int).to_string())
+            }
+        }
+    }
+}
+
+impl From<segment::data_types::facets::FacetValueHit> for FacetValueHit {
+    fn from(value: segment::data_types::facets::FacetValueHit) -> Self {
+        Self {
+            value: From::from(value.value),
+            count: value.count,
+        }
+    }
+}
+
+impl From<segment::data_types::facets::FacetResponse> for FacetResponse {
+    fn from(value: segment::data_types::facets::FacetResponse) -> Self {
+        Self {
+            hits: value.hits.into_iter().map(From::from).collect(),
+        }
+    }
+}
+
+impl From<FacetRequestInternal> for segment::data_types::facets::FacetParams {
+    fn from(value: FacetRequestInternal) -> Self {
+        Self {
+            key: value.key,
+            limit: value.limit.unwrap_or(Self::DEFAULT_LIMIT),
+            filter: value.filter,
+            exact: value.exact.unwrap_or(Self::DEFAULT_EXACT),
         }
     }
 }

@@ -1,4 +1,3 @@
-use std::any;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -28,7 +27,7 @@ use crate::common::operation_error::{OperationError, OperationResult};
 use crate::common::utils::{self, MaybeOneOrMany, MultiValue};
 use crate::data_types::index::{
     BoolIndexParams, DatetimeIndexParams, FloatIndexParams, GeoIndexParams, IntegerIndexParams,
-    KeywordIndexParams, TextIndexParams,
+    KeywordIndexParams, TextIndexParams, UuidIndexParams,
 };
 use crate::data_types::order_by::OrderValue;
 use crate::data_types::vectors::VectorStructInternal;
@@ -48,6 +47,13 @@ pub type FloatPayloadType = f64;
 pub type IntPayloadType = i64;
 /// Type of datetime point payload
 pub type DateTimePayloadType = DateTimeWrapper;
+/// Type of Uuid point payload
+pub type UuidPayloadType = Uuid;
+/// Type of Uuid point payload key
+pub type UuidIntType = u128;
+
+/// Name of the vector field
+pub type VectorName = String;
 
 /// Wraps `DateTime<Utc>` to allow more flexible deserialization
 #[derive(Clone, Copy, Serialize, JsonSchema, Debug, PartialEq, PartialOrd)]
@@ -99,6 +105,16 @@ pub enum ExtendedPointId {
     NumId(u64),
     #[schemars(example = "id_uuid_example")]
     Uuid(Uuid),
+}
+
+impl ExtendedPointId {
+    pub fn is_num_id(&self) -> bool {
+        matches!(self, ExtendedPointId::NumId(..))
+    }
+
+    pub fn is_uuid(&self) -> bool {
+        matches!(self, ExtendedPointId::Uuid(..))
+    }
 }
 
 impl std::fmt::Display for ExtendedPointId {
@@ -366,7 +382,7 @@ pub struct SearchParams {
 
     /// Quantization params
     #[serde(default)]
-    #[validate]
+    #[validate(nested)]
     pub quantization: Option<QuantizationSearchParams>,
 
     /// If enabled, the engine will only perform search among indexed or small segments.
@@ -382,7 +398,7 @@ pub struct CollectionConfigDefaults {
     #[serde(default)]
     pub vectors: Option<VectorsConfigDefaults>,
 
-    #[validate]
+    #[validate(nested)]
     pub quantization: Option<QuantizationConfig>,
 
     #[validate(range(min = 1))]
@@ -546,7 +562,7 @@ impl ScalarQuantizationConfig {
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Validate, Clone, PartialEq, Eq, Hash)]
 pub struct ScalarQuantization {
-    #[validate]
+    #[validate(nested)]
     pub scalar: ScalarQuantizationConfig,
 }
 
@@ -572,7 +588,7 @@ impl ProductQuantizationConfig {
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Validate, Clone, PartialEq, Eq, Hash)]
 pub struct ProductQuantization {
-    #[validate]
+    #[validate(nested)]
     pub product: ProductQuantizationConfig,
 }
 
@@ -594,7 +610,7 @@ pub struct BinaryQuantizationConfig {
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Validate, Clone, PartialEq, Eq, Hash)]
 pub struct BinaryQuantization {
-    #[validate]
+    #[validate(nested)]
     pub binary: BinaryQuantizationConfig,
 }
 
@@ -771,6 +787,11 @@ pub enum VectorStorageType {
     ///
     /// Search performance is defined by disk speed and the fraction of vectors that fit in memory.
     ChunkedMmap,
+    /// Same as `ChunkedMmap`, but vectors are forced to be locked in RAM
+    /// In this way we avoid cold requests to disk, but risk to run out of memory
+    ///
+    /// Designed as a replacement for `Memory`, which doesn't depend on RocksDB
+    InRamChunkedMmap,
 }
 
 /// Storage types for vectors
@@ -804,7 +825,7 @@ impl VectorStorageType {
     /// Whether this storage type is a mmap on disk
     pub fn is_on_disk(&self) -> bool {
         match self {
-            Self::Memory => false,
+            Self::Memory | Self::InRamChunkedMmap => false,
             Self::Mmap | Self::ChunkedMmap => true,
         }
     }
@@ -845,6 +866,7 @@ impl VectorDataConfig {
             VectorStorageType::Memory => true,
             VectorStorageType::Mmap => false,
             VectorStorageType::ChunkedMmap => true,
+            VectorStorageType::InRamChunkedMmap => true,
         };
         is_index_appendable && is_storage_appendable
     }
@@ -947,7 +969,16 @@ pub trait PayloadContainer {
     fn get_value(&self, path: &JsonPath) -> MultiValue<&Value>;
 }
 
+#[allow(clippy::unnecessary_wraps)] // Used as schemars example
+fn payload_example() -> Option<Payload> {
+    Some(Payload::from(serde_json::json!({
+        "city": "London",
+        "color": "green",
+    })))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[schemars(example = "payload_example")]
 pub struct Payload(pub Map<String, Value>);
 
 impl Payload {
@@ -1103,6 +1134,7 @@ pub enum PayloadSchemaType {
     Text,
     Bool,
     Datetime,
+    Uuid,
 }
 
 impl PayloadSchemaType {
@@ -1120,6 +1152,7 @@ impl PayloadSchemaType {
             Self::Text => PayloadSchemaParams::Text(TextIndexParams::default()),
             Self::Bool => PayloadSchemaParams::Bool(BoolIndexParams::default()),
             Self::Datetime => PayloadSchemaParams::Datetime(DatetimeIndexParams::default()),
+            Self::Uuid => PayloadSchemaParams::Uuid(UuidIndexParams::default()),
         }
     }
 }
@@ -1135,6 +1168,7 @@ pub enum PayloadSchemaParams {
     Text(TextIndexParams),
     Bool(BoolIndexParams),
     Datetime(DatetimeIndexParams),
+    Uuid(UuidIndexParams),
 }
 
 impl PayloadSchemaParams {
@@ -1152,6 +1186,33 @@ impl PayloadSchemaParams {
             PayloadSchemaParams::Text(_) => PayloadSchemaType::Text,
             PayloadSchemaParams::Bool(_) => PayloadSchemaType::Bool,
             PayloadSchemaParams::Datetime(_) => PayloadSchemaType::Datetime,
+            PayloadSchemaParams::Uuid(_) => PayloadSchemaType::Uuid,
+        }
+    }
+
+    pub fn tenant_optimization(&self) -> bool {
+        match self {
+            PayloadSchemaParams::Keyword(keyword) => keyword.is_tenant.unwrap_or_default(),
+            PayloadSchemaParams::Integer(integer) => integer.is_principal.unwrap_or_default(),
+            PayloadSchemaParams::Float(float) => float.is_principal.unwrap_or_default(),
+            PayloadSchemaParams::Datetime(datetime) => datetime.is_principal.unwrap_or_default(),
+            PayloadSchemaParams::Uuid(uuid) => uuid.is_tenant.unwrap_or_default(),
+            PayloadSchemaParams::Geo(_)
+            | PayloadSchemaParams::Text(_)
+            | PayloadSchemaParams::Bool(_) => false,
+        }
+    }
+
+    pub fn is_on_disk(&self) -> bool {
+        match self {
+            PayloadSchemaParams::Keyword(i) => i.on_disk.unwrap_or_default(),
+            PayloadSchemaParams::Integer(i) => i.on_disk.unwrap_or_default(),
+            PayloadSchemaParams::Float(i) => i.on_disk.unwrap_or_default(),
+            PayloadSchemaParams::Datetime(i) => i.on_disk.unwrap_or_default(),
+            PayloadSchemaParams::Uuid(i) => i.on_disk.unwrap_or_default(),
+            PayloadSchemaParams::Geo(_) => false,
+            PayloadSchemaParams::Text(_) => false,
+            PayloadSchemaParams::Bool(_) => false,
         }
     }
 }
@@ -1161,6 +1222,15 @@ impl PayloadSchemaParams {
 pub enum PayloadFieldSchema {
     FieldType(PayloadSchemaType),
     FieldParams(PayloadSchemaParams),
+}
+
+impl Display for PayloadFieldSchema {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            PayloadFieldSchema::FieldType(t) => write!(f, "{}", t.name()),
+            PayloadFieldSchema::FieldParams(p) => write!(f, "{}", p.name()),
+        }
+    }
 }
 
 impl PayloadFieldSchema {
@@ -1176,6 +1246,27 @@ impl PayloadFieldSchema {
         match self {
             PayloadFieldSchema::FieldType(field_type) => field_type.name(),
             PayloadFieldSchema::FieldParams(field_params) => field_params.name(),
+        }
+    }
+
+    pub fn is_tenant(&self) -> bool {
+        match self {
+            PayloadFieldSchema::FieldType(_) => false,
+            PayloadFieldSchema::FieldParams(params) => params.tenant_optimization(),
+        }
+    }
+
+    pub fn is_on_disk(&self) -> bool {
+        match self {
+            PayloadFieldSchema::FieldType(_) => false,
+            PayloadFieldSchema::FieldParams(params) => params.is_on_disk(),
+        }
+    }
+
+    pub fn kind(&self) -> PayloadSchemaType {
+        match self {
+            PayloadFieldSchema::FieldType(t) => *t,
+            PayloadFieldSchema::FieldParams(p) => p.kind(),
         }
     }
 }
@@ -1252,7 +1343,7 @@ where
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum ValueVariants {
-    Keyword(String),
+    String(String),
     Integer(IntPayloadType),
     Bool(bool),
 }
@@ -1260,7 +1351,7 @@ pub enum ValueVariants {
 impl ValueVariants {
     pub fn to_value(&self) -> Value {
         match self {
-            ValueVariants::Keyword(keyword) => Value::String(keyword.clone()),
+            ValueVariants::String(keyword) => Value::String(keyword.clone()),
             &ValueVariants::Integer(integer) => Value::Number(integer.into()),
             &ValueVariants::Bool(flag) => Value::Bool(flag),
         }
@@ -1270,7 +1361,7 @@ impl ValueVariants {
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum AnyVariants {
-    Keywords(IndexSet<String, FnvBuildHasher>),
+    Strings(IndexSet<String, FnvBuildHasher>),
     Integers(IndexSet<IntPayloadType, FnvBuildHasher>),
 }
 
@@ -1376,7 +1467,7 @@ impl From<bool> for Match {
 impl From<String> for Match {
     fn from(keyword: String) -> Self {
         Self::Value(MatchValue {
-            value: ValueVariants::Keyword(keyword),
+            value: ValueVariants::String(keyword),
         })
     }
 }
@@ -1384,7 +1475,7 @@ impl From<String> for Match {
 impl From<SmolStr> for Match {
     fn from(keyword: SmolStr) -> Self {
         Self::Value(MatchValue {
-            value: ValueVariants::Keyword(keyword.into()),
+            value: ValueVariants::String(keyword.into()),
         })
     }
 }
@@ -1401,8 +1492,14 @@ impl From<Vec<String>> for Match {
     fn from(keywords: Vec<String>) -> Self {
         let keywords: IndexSet<String, FnvBuildHasher> = keywords.into_iter().collect();
         Self::Any(MatchAny {
-            any: AnyVariants::Keywords(keywords),
+            any: AnyVariants::Strings(keywords),
         })
+    }
+}
+
+impl From<ValueVariants> for Match {
+    fn from(value: ValueVariants) -> Self {
+        Self::Value(MatchValue { value })
     }
 }
 
@@ -1410,7 +1507,7 @@ impl From<Vec<String>> for MatchExcept {
     fn from(keywords: Vec<String>) -> Self {
         let keywords: IndexSet<String, FnvBuildHasher> = keywords.into_iter().collect();
         MatchExcept {
-            except: AnyVariants::Keywords(keywords),
+            except: AnyVariants::Strings(keywords),
         }
     }
 }
@@ -1524,17 +1621,21 @@ pub struct ValuesCount {
 }
 
 impl ValuesCount {
-    pub fn check_count(&self, value: &Value) -> bool {
+    pub fn check_count(&self, count: usize) -> bool {
+        self.lt.map_or(true, |x| count < x)
+            && self.gt.map_or(true, |x| count > x)
+            && self.lte.map_or(true, |x| count <= x)
+            && self.gte.map_or(true, |x| count >= x)
+    }
+
+    pub fn check_count_from(&self, value: &Value) -> bool {
         let count = match value {
             Value::Null => 0,
             Value::Array(array) => array.len(),
             _ => 1,
         };
 
-        self.lt.map_or(true, |x| count < x)
-            && self.gt.map_or(true, |x| count > x)
-            && self.lte.map_or(true, |x| count <= x)
-            && self.gte.map_or(true, |x| count >= x)
+        self.check_count(count)
     }
 }
 
@@ -1874,13 +1975,13 @@ impl From<HashSet<PointIdType>> for HasIdCondition {
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Validate)]
 pub struct Nested {
     pub key: PayloadKeyType,
-    #[validate]
+    #[validate(nested)]
     pub filter: Filter,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Clone, PartialEq, Validate)]
 pub struct NestedCondition {
-    #[validate]
+    #[validate(nested)]
     pub nested: Nested,
 }
 
@@ -1923,7 +2024,7 @@ pub enum Condition {
     Filter(Filter),
 
     #[serde(skip)]
-    Resharding(Arc<dyn ReshardingCondition + Send + Sync + 'static>),
+    CustomIdChecker(Arc<dyn CustomIdCheckerCondition + Send + Sync + 'static>),
 }
 
 impl PartialEq for Condition {
@@ -1935,7 +2036,7 @@ impl PartialEq for Condition {
             (Self::HasId(this), Self::HasId(other)) => this == other,
             (Self::Nested(this), Self::Nested(other)) => this == other,
             (Self::Filter(this), Self::Filter(other)) => this == other,
-            (Self::Resharding(this), Self::Resharding(other)) => this.eq(other.deref()),
+            (Self::CustomIdChecker(_), Self::CustomIdChecker(_)) => false,
             _ => false,
         }
     }
@@ -1947,10 +2048,6 @@ impl Condition {
             nested: Nested { key, filter },
         })
     }
-
-    pub fn is_local_only(&self) -> bool {
-        matches!(self, Condition::Resharding(_))
-    }
 }
 
 // The validator crate does not support deriving for enums.
@@ -1961,17 +2058,14 @@ impl Validate for Condition {
             Condition::Field(field_condition) => field_condition.validate(),
             Condition::Nested(nested_condition) => nested_condition.validate(),
             Condition::Filter(filter) => filter.validate(),
-            Condition::Resharding(_) => Ok(()),
+            Condition::CustomIdChecker(_) => Ok(()),
         }
     }
 }
 
-pub trait ReshardingCondition: fmt::Debug {
+pub trait CustomIdCheckerCondition: fmt::Debug {
     fn estimate_cardinality(&self, points: usize) -> CardinalityEstimation;
     fn check(&self, point_id: ExtendedPointId) -> bool;
-
-    fn eq(&self, other: &dyn ReshardingCondition) -> bool;
-    fn as_any(&self) -> &dyn any::Any;
 }
 
 /// Options for specifying which payload to include or not
@@ -2170,20 +2264,20 @@ pub struct MinShould {
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct Filter {
     /// At least one of those conditions should match
-    #[validate]
+    #[validate(nested)]
     #[serde(default, with = "MaybeOneOrMany")]
     #[schemars(with = "MaybeOneOrMany<Condition>")]
     pub should: Option<Vec<Condition>>,
     /// At least minimum amount of given conditions should match
-    #[validate]
+    #[validate(nested)]
     pub min_should: Option<MinShould>,
     /// All conditions must match
-    #[validate]
+    #[validate(nested)]
     #[serde(default, with = "MaybeOneOrMany")]
     #[schemars(with = "MaybeOneOrMany<Condition>")]
     pub must: Option<Vec<Condition>>,
     /// All conditions must NOT match
-    #[validate]
+    #[validate(nested)]
     #[serde(default, with = "MaybeOneOrMany")]
     #[schemars(with = "MaybeOneOrMany<Condition>")]
     pub must_not: Option<Vec<Condition>>,
@@ -2271,6 +2365,15 @@ impl Filter {
             (None, Some(other)) => Some(other),
             (Some(this), Some(other)) => Some(this.merge_owned(other)),
         }
+    }
+
+    pub fn iter_conditions(&self) -> impl Iterator<Item = &Condition> {
+        self.must
+            .iter()
+            .flatten()
+            .chain(self.must_not.iter().flatten())
+            .chain(self.should.iter().flatten())
+            .chain(self.min_should.iter().flat_map(|i| &i.conditions))
     }
 }
 
@@ -2616,7 +2719,7 @@ mod tests {
         assert_eq!(
             condition.r#match.unwrap(),
             Match::Value(MatchValue {
-                value: ValueVariants::Keyword("world".to_owned())
+                value: ValueVariants::String("world".to_owned())
             })
         );
     }
@@ -2644,24 +2747,21 @@ mod tests {
         let should = filter.should.unwrap();
 
         assert_eq!(should.len(), 1);
-        let c = match should.first() {
-            Some(Condition::Field(c)) => c,
-            _ => panic!("Condition::Field expected"),
+        let Some(Condition::Field(c)) = should.first() else {
+            panic!("Condition::Field expected")
         };
 
         assert_eq!(c.key.to_string(), "Jason");
 
-        let m = match c.r#match.as_ref().unwrap() {
-            Match::Any(m) => m,
-            _ => panic!("Match::Any expected"),
+        let Match::Any(m) = c.r#match.as_ref().unwrap() else {
+            panic!("Match::Any expected")
         };
-        if let AnyVariants::Keywords(kws) = &m.any {
+        if let AnyVariants::Strings(kws) = &m.any {
             assert_eq!(kws.len(), 3);
-            let expect: IndexSet<_, FnvBuildHasher> = IndexSet::from_iter(
-                ["Bourne", "Momoa", "Statham"]
-                    .into_iter()
-                    .map(|i| i.to_string()),
-            );
+            let expect: IndexSet<_, FnvBuildHasher> = ["Bourne", "Momoa", "Statham"]
+                .into_iter()
+                .map(|i| i.to_string())
+                .collect();
             assert_eq!(kws, &expect);
         } else {
             panic!("AnyVariants::Keywords expected");
@@ -2731,7 +2831,7 @@ mod tests {
         assert_eq!(
             condition.r#match.unwrap(),
             Match::Value(MatchValue {
-                value: ValueVariants::Keyword("world".to_owned())
+                value: ValueVariants::String("world".to_owned())
             })
         );
     }
@@ -2754,9 +2854,8 @@ mod tests {
         let should = filter.should.unwrap();
 
         assert_eq!(should.len(), 1);
-        let c = match should.first() {
-            Some(Condition::IsEmpty(c)) => c,
-            _ => panic!("Condition::IsEmpty expected"),
+        let Some(Condition::IsEmpty(c)) = should.first() else {
+            panic!("Condition::IsEmpty expected")
         };
 
         assert_eq!(c.is_empty.key.to_string(), "Jason");
@@ -2780,9 +2879,8 @@ mod tests {
         let should = filter.should.unwrap();
 
         assert_eq!(should.len(), 1);
-        let c = match should.first() {
-            Some(Condition::IsNull(c)) => c,
-            _ => panic!("Condition::IsNull expected"),
+        let Some(Condition::IsNull(c)) = should.first() else {
+            panic!("Condition::IsNull expected")
         };
 
         assert_eq!(c.is_null.key.to_string(), "Jason");
@@ -2844,7 +2942,7 @@ mod tests {
                     _ => panic!("Condition::Field expected"),
                 }
             }
-            o => panic!("Condition::Nested expected but got {:?}", o),
+            o => panic!("Condition::Nested expected but got {o:?}"),
         };
     }
 
@@ -2873,7 +2971,7 @@ mod tests {
 
         let first_must = musts.first().unwrap();
         let Condition::Nested(nested_condition) = first_must else {
-            panic!("Condition::Nested expected but got {:?}", first_must)
+            panic!("Condition::Nested expected but got {first_must:?}")
         };
 
         assert_eq!(nested_condition.raw_key().to_string(), "country.cities");
@@ -2884,7 +2982,7 @@ mod tests {
 
         let must = nested_must.first().unwrap();
         let Condition::Field(c) = must else {
-            panic!("Condition::Field expected, got {:?}", must)
+            panic!("Condition::Field expected, got {must:?}")
         };
 
         assert_eq!(c.key.to_string(), "population");
@@ -3217,7 +3315,7 @@ mod tests {
 
         let condition2 = Condition::Field(FieldCondition::new_match(
             JsonPath::new("city"),
-            Match::new_value(ValueVariants::Keyword("Osaka".into())),
+            Match::new_value(ValueVariants::String("Osaka".into())),
         ));
         let other = Filter::new_must(condition2.clone());
 
@@ -3459,10 +3557,20 @@ mod tests {
     }
 }
 
+fn shard_key_string_example() -> String {
+    "region_1".to_string()
+}
+
+fn shard_key_number_example() -> u64 {
+    12
+}
+
 #[derive(Deserialize, Serialize, JsonSchema, Debug, Clone, PartialEq, Eq, Hash)]
 #[serde(untagged)]
 pub enum ShardKey {
+    #[schemars(example = "shard_key_string_example")]
     Keyword(String),
+    #[schemars(example = "shard_key_number_example")]
     Number(u64),
 }
 
@@ -3487,8 +3595,8 @@ impl From<u64> for ShardKey {
 impl Display for ShardKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ShardKey::Keyword(keyword) => write!(f, "\"{}\"", keyword),
-            ShardKey::Number(number) => write!(f, "{}", number),
+            ShardKey::Keyword(keyword) => write!(f, "\"{keyword}\""),
+            ShardKey::Number(number) => write!(f, "{number}"),
         }
     }
 }

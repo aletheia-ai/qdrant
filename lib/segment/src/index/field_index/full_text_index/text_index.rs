@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use common::types::PointOffsetType;
@@ -17,7 +18,8 @@ use crate::index::field_index::full_text_index::inverted_index::{
 };
 use crate::index::field_index::full_text_index::tokenizers::Tokenizer;
 use crate::index::field_index::{
-    CardinalityEstimation, PayloadBlockCondition, PayloadFieldIndex, ValueIndexer,
+    CardinalityEstimation, FieldIndexBuilderTrait, PayloadBlockCondition, PayloadFieldIndex,
+    ValueIndexer,
 };
 use crate::telemetry::PayloadIndexTelemetry;
 use crate::types::{FieldCondition, Match, PayloadKeyType};
@@ -37,7 +39,7 @@ impl FullTextIndex {
         bincode::deserialize(data).unwrap()
     }
 
-    fn serialize_document_tokens(&self, tokens: BTreeSet<String>) -> OperationResult<Vec<u8>> {
+    fn serialize_document_tokens(tokens: BTreeSet<String>) -> OperationResult<Vec<u8>> {
         #[derive(Serialize)]
         struct StoredDocument {
             tokens: BTreeSet<String>,
@@ -82,6 +84,14 @@ impl FullTextIndex {
         }
     }
 
+    pub fn builder(
+        db: Arc<RwLock<DB>>,
+        config: TextIndexParams,
+        field: &str,
+    ) -> FullTextIndexBuilder {
+        FullTextIndexBuilder(Self::new(db, config, field, true))
+    }
+
     pub fn get_telemetry_data(&self) -> PayloadIndexTelemetry {
         PayloadIndexTelemetry {
             field_name: None,
@@ -89,10 +99,6 @@ impl FullTextIndex {
             points_count: self.inverted_index.points_count(),
             histogram_bucket_size: None,
         }
-    }
-
-    pub fn recreate(&self) -> OperationResult<()> {
-        self.db_wrapper.recreate_column_family()
     }
 
     pub fn parse_query(&self, text: &str) -> ParsedQuery {
@@ -134,7 +140,27 @@ impl FullTextIndex {
     }
 }
 
-impl ValueIndexer<String> for FullTextIndex {
+pub struct FullTextIndexBuilder(FullTextIndex);
+
+impl FieldIndexBuilderTrait for FullTextIndexBuilder {
+    type FieldIndexType = FullTextIndex;
+
+    fn init(&mut self) -> OperationResult<()> {
+        self.0.db_wrapper.recreate_column_family()
+    }
+
+    fn add_point(&mut self, id: PointOffsetType, payload: &[&Value]) -> OperationResult<()> {
+        self.0.add_point(id, payload)
+    }
+
+    fn finalize(self) -> OperationResult<Self::FieldIndexType> {
+        Ok(self.0)
+    }
+}
+
+impl ValueIndexer for FullTextIndex {
+    type ValueType = String;
+
     fn add_many(&mut self, idx: PointOffsetType, values: Vec<String>) -> OperationResult<()> {
         if values.is_empty() {
             return Ok(());
@@ -152,14 +178,14 @@ impl ValueIndexer<String> for FullTextIndex {
         self.inverted_index.index_document(idx, document)?;
 
         let db_idx = Self::store_key(&idx);
-        let db_document = self.serialize_document_tokens(tokens)?;
+        let db_document = Self::serialize_document_tokens(tokens)?;
 
         self.db_wrapper.put(db_idx, db_document)?;
 
         Ok(())
     }
 
-    fn get_value(&self, value: &Value) -> Option<String> {
+    fn get_value(value: &Value) -> Option<String> {
         if let Value::String(keyword) = value {
             return Some(keyword.to_owned());
         }
@@ -204,30 +230,30 @@ impl PayloadFieldIndex for FullTextIndex {
         self.db_wrapper.flusher()
     }
 
+    fn files(&self) -> Vec<PathBuf> {
+        vec![]
+    }
+
     fn filter(
         &self,
         condition: &FieldCondition,
-    ) -> OperationResult<Box<dyn Iterator<Item = PointOffsetType> + '_>> {
+    ) -> Option<Box<dyn Iterator<Item = PointOffsetType> + '_>> {
         if let Some(Match::Text(text_match)) = &condition.r#match {
             let parsed_query = self.parse_query(&text_match.text);
-            return Ok(self.inverted_index.filter(&parsed_query));
+            return Some(self.inverted_index.filter(&parsed_query));
         }
-        Err(OperationError::service_error("failed to filter"))
+        None
     }
 
-    fn estimate_cardinality(
-        &self,
-        condition: &FieldCondition,
-    ) -> OperationResult<CardinalityEstimation> {
+    fn estimate_cardinality(&self, condition: &FieldCondition) -> Option<CardinalityEstimation> {
         if let Some(Match::Text(text_match)) = &condition.r#match {
             let parsed_query = self.parse_query(&text_match.text);
-            return Ok(self
-                .inverted_index
-                .estimate_cardinality(&parsed_query, condition));
+            return Some(
+                self.inverted_index
+                    .estimate_cardinality(&parsed_query, condition),
+            );
         }
-        Err(OperationError::service_error(
-            "failed to estimate cardinality",
-        ))
+        None
     }
 
     fn payload_blocks(
@@ -280,9 +306,9 @@ mod tests {
         {
             let db = open_db_with_existing_cf(&temp_dir.path().join("test_db")).unwrap();
 
-            let mut index = FullTextIndex::new(db, config.clone(), "text", true);
-
-            index.recreate().unwrap();
+            let mut index = FullTextIndex::builder(db, config.clone(), "text")
+                .make_empty()
+                .unwrap();
 
             for (idx, payload) in payloads.iter().enumerate() {
                 index.add_point(idx as PointOffsetType, &[payload]).unwrap();

@@ -7,14 +7,16 @@ use segment::data_types::order_by::OrderBy;
 use segment::data_types::vectors::{
     MultiDenseVectorInternal, NamedQuery, NamedVectorStruct, Vector, VectorRef, DEFAULT_VECTOR_NAME,
 };
+use segment::json_path::JsonPath;
 use segment::types::{
     Condition, ExtendedPointId, Filter, HasIdCondition, PointIdType, SearchParams,
     WithPayloadInterface, WithVector,
 };
 use segment::vector_storage::query::{ContextPair, ContextQuery, DiscoveryQuery, RecoQuery};
 
-use super::shard_query::{Fusion, ScoringQuery, ShardPrefetch, ShardQueryRequest};
+use super::shard_query::{Fusion, Sample, ScoringQuery, ShardPrefetch, ShardQueryRequest};
 use crate::common::fetch_vectors::ReferencedVectors;
+use crate::lookup::WithLookup;
 use crate::operations::query_enum::QueryEnum;
 use crate::operations::types::{CollectionError, CollectionResult};
 use crate::recommendations::avg_vector_for_recommendation;
@@ -56,6 +58,24 @@ pub struct CollectionQueryResolveRequest<'a> {
     pub using: String,
 }
 
+/// Internal representation of a group query request, used to converge from REST and gRPC.
+#[derive(Debug)]
+pub struct CollectionQueryGroupsRequest {
+    pub prefetch: Vec<CollectionPrefetch>,
+    pub query: Option<Query>,
+    pub using: String,
+    pub filter: Option<Filter>,
+    pub params: Option<SearchParams>,
+    pub score_threshold: Option<ScoreType>,
+    pub with_vector: WithVector,
+    pub with_payload: WithPayloadInterface,
+    pub lookup_from: Option<LookupLocation>,
+    pub group_by: JsonPath,
+    pub group_size: usize,
+    pub limit: usize,
+    pub with_lookup: Option<WithLookup>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Query {
     /// Score points against some vector(s)
@@ -66,6 +86,9 @@ pub enum Query {
 
     /// Order by a payload field
     OrderBy(OrderBy),
+
+    /// Sample points
+    Sample(Sample),
 }
 
 impl Query {
@@ -87,6 +110,7 @@ impl Query {
             }
             Query::Fusion(fusion) => ScoringQuery::Fusion(fusion),
             Query::OrderBy(order_by) => ScoringQuery::OrderBy(order_by),
+            Query::Sample(sample) => ScoringQuery::Sample(sample),
         };
 
         Ok(scoring_query)
@@ -445,6 +469,12 @@ impl CollectionQueryRequest {
             self.score_threshold,
         )?;
 
+        let mut offset = self.offset;
+        if matches!(self.query, Some(Query::Sample(Sample::Random))) && self.prefetch.is_empty() {
+            // Shortcut: Ignore offset with random query, since output is not stable.
+            offset = 0;
+        }
+
         let query_lookup_collection = self.get_lookup_collection().cloned();
         let query_lookup_vector_name = self.get_lookup_vector_name();
         let using = self.using.clone();
@@ -479,7 +509,7 @@ impl CollectionQueryRequest {
             filter,
             score_threshold: self.score_threshold,
             limit: self.limit,
-            offset: self.offset,
+            offset,
             params: self.params,
             with_vector: self.with_vector,
             with_payload: self.with_payload,
@@ -533,6 +563,43 @@ mod from_rest {
     use api::rest::schema as rest;
 
     use super::*;
+
+    impl From<rest::QueryGroupsRequestInternal> for CollectionQueryGroupsRequest {
+        fn from(value: rest::QueryGroupsRequestInternal) -> Self {
+            let rest::QueryGroupsRequestInternal {
+                prefetch,
+                query,
+                using,
+                filter,
+                score_threshold,
+                params,
+                with_vector,
+                with_payload,
+                lookup_from,
+                group_request,
+            } = value;
+
+            Self {
+                prefetch: prefetch.into_iter().flatten().map(From::from).collect(),
+                query: query.map(From::from),
+                using: using.unwrap_or(DEFAULT_VECTOR_NAME.to_string()),
+                filter,
+                score_threshold,
+                params,
+                with_vector: with_vector.unwrap_or(CollectionQueryRequest::DEFAULT_WITH_VECTOR),
+                with_payload: with_payload.unwrap_or(CollectionQueryRequest::DEFAULT_WITH_PAYLOAD),
+                lookup_from,
+                limit: group_request
+                    .limit
+                    .unwrap_or(CollectionQueryRequest::DEFAULT_LIMIT),
+                group_by: group_request.group_by,
+                group_size: group_request
+                    .group_size
+                    .unwrap_or(CollectionQueryRequest::DEFAULT_GROUP_SIZE),
+                with_lookup: group_request.with_lookup.map(WithLookup::from),
+            }
+        }
+    }
 
     impl From<rest::QueryRequestInternal> for CollectionQueryRequest {
         fn from(value: rest::QueryRequestInternal) -> Self {
@@ -609,6 +676,7 @@ mod from_rest {
                 rest::Query::Context(context) => Query::Vector(From::from(context.context)),
                 rest::Query::OrderBy(order_by) => Query::OrderBy(OrderBy::from(order_by.order_by)),
                 rest::Query::Fusion(fusion) => Query::Fusion(Fusion::from(fusion.fusion)),
+                rest::Query::Sample(sample) => Query::Sample(Sample::from(sample.sample)),
             }
         }
     }
@@ -673,6 +741,10 @@ mod from_rest {
                     // TODO(universal-query): Validate at API level
                     Vector::MultiDense(MultiDenseVectorInternal::new_unchecked(multi_dense)),
                 ),
+                rest::VectorInput::Document(_) => {
+                    // If this is reached, it means validation failed
+                    unimplemented!("Document inference is not implemented")
+                }
             }
         }
     }
@@ -691,16 +763,81 @@ mod from_rest {
         fn from(value: rest::Fusion) -> Self {
             match value {
                 rest::Fusion::Rrf => Fusion::Rrf,
+                rest::Fusion::Dbsf => Fusion::Dbsf,
+            }
+        }
+    }
+
+    impl From<rest::Sample> for Sample {
+        fn from(value: rest::Sample) -> Self {
+            match value {
+                rest::Sample::Random => Sample::Random,
             }
         }
     }
 }
 
 pub mod from_grpc {
+    use api::grpc::conversions::json_path_from_proto;
     use api::grpc::qdrant::{self as grpc};
     use tonic::Status;
 
     use super::*;
+
+    impl TryFrom<api::grpc::qdrant::QueryPointGroups> for CollectionQueryGroupsRequest {
+        type Error = Status;
+
+        fn try_from(value: api::grpc::qdrant::QueryPointGroups) -> Result<Self, Self::Error> {
+            let grpc::QueryPointGroups {
+                collection_name: _,
+                prefetch,
+                query,
+                using,
+                filter,
+                params,
+                score_threshold,
+                with_payload,
+                with_vectors,
+                lookup_from,
+                limit,
+                group_size,
+                group_by,
+                with_lookup,
+                read_consistency: _,
+                timeout: _,
+                shard_key_selector: _,
+            } = value;
+
+            let request = CollectionQueryGroupsRequest {
+                prefetch: prefetch
+                    .into_iter()
+                    .map(TryFrom::try_from)
+                    .collect::<Result<_, _>>()?,
+                query: query.map(TryFrom::try_from).transpose()?,
+                using: using.unwrap_or(DEFAULT_VECTOR_NAME.to_string()),
+                filter: filter.map(TryFrom::try_from).transpose()?,
+                score_threshold,
+                with_vector: with_vectors
+                    .map(From::from)
+                    .unwrap_or(CollectionQueryRequest::DEFAULT_WITH_VECTOR),
+                with_payload: with_payload
+                    .map(TryFrom::try_from)
+                    .transpose()?
+                    .unwrap_or(CollectionQueryRequest::DEFAULT_WITH_PAYLOAD),
+                lookup_from: lookup_from.map(From::from),
+                group_by: json_path_from_proto(&group_by)?,
+                group_size: group_size
+                    .map(|s| s as usize)
+                    .unwrap_or(CollectionQueryRequest::DEFAULT_GROUP_SIZE),
+                limit: limit
+                    .map(|l| l as usize)
+                    .unwrap_or(CollectionQueryRequest::DEFAULT_LIMIT),
+                params: params.map(From::from),
+                with_lookup: with_lookup.map(TryFrom::try_from).transpose()?,
+            };
+            Ok(request)
+        }
+    }
 
     impl TryFrom<api::grpc::qdrant::QueryPoints> for CollectionQueryRequest {
         type Error = Status;
@@ -807,6 +944,7 @@ pub mod from_grpc {
                 Variant::Context(context) => Query::Vector(TryFrom::try_from(context)?),
                 Variant::OrderBy(order_by) => Query::OrderBy(OrderBy::try_from(order_by)?),
                 Variant::Fusion(fusion) => Query::Fusion(Fusion::try_from(fusion)?),
+                Variant::Sample(sample) => Query::Sample(Sample::try_from(sample)?),
             };
 
             Ok(query)
@@ -835,7 +973,9 @@ pub mod from_grpc {
             let reco_query = RecoQuery::new(positives, negatives);
 
             let strategy = strategy
-                .and_then(grpc::RecommendStrategy::from_i32)
+                .and_then(|x|
+                    // XXX: Invalid values silently converted to None
+                    grpc::RecommendStrategy::try_from(x).ok())
                 .map(RecommendStrategy::from)
                 .unwrap_or_default();
 

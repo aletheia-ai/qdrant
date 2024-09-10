@@ -18,6 +18,18 @@ pub struct ScoreFusion {
     pub order: Order,
 }
 
+impl ScoreFusion {
+    /// Params for the distribution-based score fusion
+    pub fn dbsf() -> Self {
+        Self {
+            method: Aggregation::Sum,
+            norm: Normalization::Distr,
+            weights: vec![],
+            order: Order::LargeBetter,
+        }
+    }
+}
+
 /// Defines how to combine the scores of the same point in different lists
 pub enum Aggregation {
     /// Sums the scores
@@ -170,7 +182,7 @@ mod tests {
     }
 
     fn assert_close(a: f32, b: f32) {
-        assert!((a - b).abs() < 1e-2, "{} is not close to {}", a, b);
+        assert!((a - b).abs() < 1e-2, "{a} is not close to {b}");
     }
 
     proptest! {
